@@ -45,15 +45,15 @@ const imapConfig = {
 };
 
 // --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
+// --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
 app.post('/api/fetch-latest-ekstreler', async (req, res) => {
     try {
         console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
         const connection = await imaps.connect(imapConfig);
         await connection.openBox('INBOX');
 
-        // 1. MAİLİ BUL (Senin ekran görüntündeki tam mail adresi ve konu)
+        // 1. MAİLİ BUL 
         const searchCriteria = ['ALL', ['FROM', 'enpara@enpara.com'], ['SUBJECT', 'ekstreniz']];
-        // ÇÖZÜM: Maili parça parça değil, tek bir ham paket olarak çekiyoruz ('')
         const fetchOptions = { bodies: [''], markSeen: false }; 
         
         const messages = await connection.search(searchCriteria, fetchOptions);
@@ -79,23 +79,23 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             return res.json({ success: false, error: "Mail bulundu ama içinde PDF eki tespit edilemedi!" });
         }
 
-        // İşte şimdi elimizde %100 saf, gerçek bir dijital PDF verisi var (Buffer)
         const pdfBuffer = pdfAttachment.content; 
 
         console.log("PDF %100 başarıyla ayıkladı. Yazılar okunuyor...");
 
-        // --- 3. PDF'İ OKUMA VE YAZIYA ÇEVİRME ---
-        const pdfParse = require('pdf-parse'); // Kütüphaneyi burada net olarak çağırıyoruz
-        const pdfData = await pdfParse(pdfBuffer);
+        // --- 3. YENİ NESİL PDF OKUMA MOTORU (V2 SÜRÜMÜNE ÖZEL) ---
+        const { PDFParse } = require('pdf-parse'); // YENİ: Parantez içinde özel çağırılır
+        const parser = new PDFParse({ data: pdfBuffer }); // YENİ: Sınıf olarak başlatılır
+        const pdfData = await parser.getRaw(); // YENİ: Veri Raw (Ham) olarak çekilir
         const text = pdfData.text;
 
-        // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026") - Benzersiz ID yapmak için
+        // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026")
         const dateMatch = text.match(/Ekstre tarihi\s*(\d{2}\/\d{2}\/\d{4})/);
         if (!dateMatch) {
             return res.json({ success: false, error: "PDF formatı anlaşılamadı, ekstre tarihi bulunamıyor." });
         }
         
-        const ekstreTarihiStr = dateMatch[1]; // "03/06/2026"
+        const ekstreTarihiStr = dateMatch[1]; 
         const [, month, year] = ekstreTarihiStr.split('/');
         const ekstreID = `${year}-${month}`; // "2026-06" (Firebase için benzersiz ID)
 
