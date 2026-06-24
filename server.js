@@ -104,37 +104,47 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             return res.json({ success: true, message: `⚠️ ${month}. Ay ${year} ekstresi zaten sistemde kayıtlı. Es geçildi!` });
         }
 
-      // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
-        // 🎯 ÇÖZÜM 1: EFSANEVİ ZIRHLI REGEX MOTORU
-        // Baştaki ">>", alt satıra taşan karmaşık metinler ve yanlış noktalanmış kuruşları bile eksiksiz yakalar!
-        // Tarih (Örn: 18/05/2026) -> İsteğe bağlı semboller -> Metin (Alt satıra taşsa da yakala) -> Para (Nokta veya Virgül Kuruşlu)
-        const itemRegex = /(\d{2}\/\d{2}\/\d{4})[\s>)]*([\s\S]+?)\s+(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/g;
+     // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
+        // 🎯 ÇÖZÜM 1: EFSANEVİ PARÇALAYICI MOTOR
+        // PDF'in dijital arka planında gizli olan tablo tırnaklarını ve enter'ları eziyoruz
+        const cleanText = text.replace(/["\n\r]/g, ' ').replace(/,{1,}/g, ' ');
         
-        let match;
+        // Tertemiz olan metni tarihlere (Örn: 18/05/2026) göre satır satır bloklara bölüyoruz
+        const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4}\s+)/);
+        
         const processedItems = {};
         let itemIndex = 0;
 
-        while ((match = itemRegex.exec(text)) !== null) {
-            const date = match[1].trim();
-            // Açıklama içindeki gereksiz enter'ları ve boşlukları tek bir boşluğa indirge
-            const desc = match[2].replace(/\s+/g, ' ').trim(); 
-            const amountStr = match[3];
+        parts.forEach(part => {
+            const dateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})\s+/);
+            if (!dateMatch) return; // Tarihle başlamıyorsa bu bir harcama satırı değildir
+            
+            const date = dateMatch[1];
+            
+            // Bu blok içindeki TÜM para tutarlarını bul (Taksitli işlemlerde 2 kere TL yazar)
+            const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/g)];
+            if (amountMatches.length === 0) return; // TL yoksa atla
+            
+            // Asıl çekilen tutar her zaman EN SONDAKİ rakamdır
+            const lastAmountMatch = amountMatches[amountMatches.length - 1];
+            const amountStr = lastAmountMatch[1];
+            
+            // Açıklama kısmı, tarihten başlayıp asıl tutarın yazdığı yere kadar olan tüm metindir
+            const desc = part.substring(dateMatch[0].length, lastAmountMatch.index).trim();
+            
+            // "Ödeme" satırlarını ve "Bir önceki ekstre" ibarelerini atla
+            if (desc.toLowerCase().includes('ödeme') || desc.toLowerCase().includes('önceki ekstre')) return;
 
-            // "Ödeme" satırlarını ve Taksit ibarelerini temizle/atla
-            if (desc.toLowerCase().includes('ödeme -') || desc.toLowerCase().includes('önceki ekstre')) continue;
-            
             // 🎯 ÇÖZÜM 2: VİRGÜL/NOKTA KATLİAMINI DÜZELTME MOTORU
-            // "3.207.35" veya "1.240,50" -> 1240.50 Float'a (Gerçek Para) çevir!
-            let rawAmount = amountStr.replace(/\s/g, ''); // Boşlukları sil
-            
-            // Sondan 3. karakteri bul (kuruş ayracı). Eğer o karakter nokta ise virgüle zorla çevir!
+            // "3.207.35" veya "1.240,50" -> 1240.50 Gerçek Matematik formatına çevir!
+            let rawAmount = amountStr.replace(/\s/g, ''); 
             const kurusIndex = rawAmount.length - 3;
             if (rawAmount[kurusIndex] === '.' || rawAmount[kurusIndex] === ',') {
                 rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, '') + '.' + rawAmount.substring(kurusIndex + 1);
             }
             
             const amount = parseFloat(rawAmount);
-            if(isNaN(amount)) continue; // Para okunamadıysa patlama, es geç
+            if(isNaN(amount)) return; // Matematiksel paraya dönemiyorsa atla
 
             const descLower = desc.toLowerCase();
             let assignedCategory = 'ev'; // Varsayılan: Şahsi Gider
@@ -146,7 +156,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
                 descLower.includes('2163357920') ||
                 descLower.includes('7040551588') ||
                 descLower.includes('faiz') || 
-                descLower.includes('bsmv') || // Faiz vergileri de dükkana!
+                descLower.includes('bsmv') || 
                 descLower.includes('kkdf')
             ) {
                 assignedCategory = 'dukkan'; 
@@ -160,11 +170,12 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
                 category: assignedCategory
             };
             itemIndex++;
-        }
+        });
 
         // Eğer hiçbir satır bulunamazsa Hata Ver
         if (itemIndex === 0) {
-            return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı. Regex ile eşleşmiyor." });
+            console.log("HATA AYIKLAMA İÇİN METİN ÖRNEĞİ:", cleanText.substring(0, 500));
+            return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı. Lütfen Render loglarına bakın." });
         }
 
         // --- 6. FIREBASE'E İLK KEZ KAYDETME ---
@@ -180,6 +191,11 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         console.log(`Bitti! ${ayAdi} ekstresi Firebase'e başarıyla yazıldı.`);
         return res.json({ success: true, message: `✅ ${ayAdi} ${year} ekstreniz başarıyla Gmail'den çekildi, ${itemIndex} harcama Ev/Dükkan olarak ayrıştırılıp sisteme işlendi!` });
 
+    } catch (error) {
+        console.error("Beklenmeyen Hata:", error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
 app.listen(PORT, () => {
     console.log(`🚀 Olimpiyat Arka Uç (Backend) İşçisi ${PORT} portunda çalışıyor!`);
 });
