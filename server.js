@@ -104,52 +104,55 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             return res.json({ success: true, message: `⚠️ ${month}. Ay ${year} ekstresi zaten sistemde kayıtlı. Es geçildi!` });
         }
 
-     // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
-        // 🎯 ÇÖZÜM 1: EFSANEVİ PARÇALAYICI MOTOR
-        // PDF'in dijital arka planında gizli olan tablo tırnaklarını ve enter'ları eziyoruz
-        const cleanText = text.replace(/["\n\r]/g, ' ').replace(/,{1,}/g, ' ');
+    // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
+        // 🎯 ÇÖZÜM: KENDİ YAZDIĞIM HATAYI SİLDİM! Virgülleri silen o hatalı kodu kaldırdım.
+        // Sadece enter'ları ve çift tırnakları boşluğa çeviriyoruz. Virgüllere ASLA DOKUNMUYORUZ!
+        const cleanText = text.replace(/["\n\r]/g, ' ').replace(/\s{2,}/g, ' ');
         
-        // Tertemiz olan metni tarihlere (Örn: 18/05/2026) göre satır satır bloklara bölüyoruz
-        const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4}\s+)/);
+        // Tarih formatına göre (Örn: 18/05/2026) faturayı satır satır bloklara böl
+        const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
         
         const processedItems = {};
         let itemIndex = 0;
 
         parts.forEach(part => {
-            const dateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})\s+/);
-            if (!dateMatch) return; // Tarihle başlamıyorsa bu bir harcama satırı değildir
+            // Bu blok gerçekten bir tarihle mi başlıyor?
+            const dateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})/);
+            if (!dateMatch) return; 
             
             const date = dateMatch[1];
             
-            // Bu blok içindeki TÜM para tutarlarını bul (Taksitli işlemlerde 2 kere TL yazar)
-            const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/g)];
-            if (amountMatches.length === 0) return; // TL yoksa atla
+            // TL tutarını yakala (Örn: "1.240,50 TL", "3.207.35 TL", "- 158.064,58 TL")
+            const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/ig)];
+            if (amountMatches.length === 0) return; // TL bulamazsa bu satırı atla
             
-            // Asıl çekilen tutar her zaman EN SONDAKİ rakamdır
+            // Aynı satırda taksit vs. varsa her zaman EN SONDAKİ TL asıl tutardır
             const lastAmountMatch = amountMatches[amountMatches.length - 1];
             const amountStr = lastAmountMatch[1];
             
-            // Açıklama kısmı, tarihten başlayıp asıl tutarın yazdığı yere kadar olan tüm metindir
-            const desc = part.substring(dateMatch[0].length, lastAmountMatch.index).trim();
+            // Tarih ve Para arasındaki her şey Açıklamadır
+            const desc = part.substring(date.length, lastAmountMatch.index).trim();
             
-            // "Ödeme" satırlarını ve "Bir önceki ekstre" ibarelerini atla
+            // "Ödeme" veya "Bir önceki ekstre" ise harcama değildir, atla!
             if (desc.toLowerCase().includes('ödeme') || desc.toLowerCase().includes('önceki ekstre')) return;
 
-            // 🎯 ÇÖZÜM 2: VİRGÜL/NOKTA KATLİAMINI DÜZELTME MOTORU
-            // "3.207.35" veya "1.240,50" -> 1240.50 Gerçek Matematik formatına çevir!
-            let rawAmount = amountStr.replace(/\s/g, ''); 
+            // 🎯 KURUŞ KATLİAMINI DÜZELTME VE SAYIYA ÇEVİRME
+            let rawAmount = amountStr.replace(/\s/g, ''); // "- 158.064,58" -> "-158.064,58"
+            
+            // Sondan 3. karaktere (kuruş ayracı) nokta/virgül işareti koyacağız
             const kurusIndex = rawAmount.length - 3;
             if (rawAmount[kurusIndex] === '.' || rawAmount[kurusIndex] === ',') {
+                // Tüm nokta/virgülleri sil, sadece kuruş kısmına gerçek İngilizce nokta (.) koy ki Node.js anlasın
                 rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, '') + '.' + rawAmount.substring(kurusIndex + 1);
             }
             
             const amount = parseFloat(rawAmount);
-            if(isNaN(amount)) return; // Matematiksel paraya dönemiyorsa atla
+            if(isNaN(amount)) return; 
 
             const descLower = desc.toLowerCase();
-            let assignedCategory = 'ev'; // Varsayılan: Şahsi Gider
+            let assignedCategory = 'ev'; 
 
-            // 🎯 ÇÖZÜM 3: SENİN İSTEDİĞİN DÜKKAN FİLTRELEME ŞARTLARI
+            // 🎯 DÜKKAN FİLTRESİ
             if (
                 descLower.includes('is net elektron') ||
                 descLower.includes('umraniye v.d') ||
@@ -172,9 +175,9 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             itemIndex++;
         });
 
-        // Eğer hiçbir satır bulunamazsa Hata Ver
+        // Eğer hiçbir satır bulunamazsa Hata Ver ve loglara temiz metni bas
         if (itemIndex === 0) {
-            console.log("HATA AYIKLAMA İÇİN METİN ÖRNEĞİ:", cleanText.substring(0, 500));
+            console.log("HATA AYIKLAMA İÇİN METİN ÖRNEĞİ:", cleanText.substring(0, 800));
             return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı. Lütfen Render loglarına bakın." });
         }
 
