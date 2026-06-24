@@ -3,9 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
-const pdfParse = require('pdf-parse');
 
-// 🎯 ÇÖZÜM: Firebase'in en yeni (Modüler) versiyonuna göre parçalayarak çağırıyoruz!
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getDatabase } = require('firebase-admin/database');
 
@@ -16,16 +14,20 @@ const PORT = process.env.PORT || 10000;
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// --- 1. FIREBASE ADMIN KURULUMU ---
-// DİKKAT: Proje ayarlarından indirdiğin firebase-adminsdk.json dosyasını klasörüne koymalısın.
-const serviceAccount = require('./firebase-adminsdk.json'); 
+// --- 1. FIREBASE ADMIN KURULUMU (GÜVENLİ KASA YÖNTEMİ) ---
+// Dosya kullanmayı bıraktık! Doğrudan Render'ın ortam değişkenlerinden (kasa) çekiyoruz.
+if (!process.env.FIREBASE_CREDENTIALS) {
+    console.error("HATA: FIREBASE_CREDENTIALS Render'a eklenmemiş!");
+}
+
+// Render'a yapıştırdığımız o metni, Node.js kodla JSON objesine çeviriyor
+const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 
 const firebaseApp = initializeApp({
     credential: cert(serviceAccount),
     databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app"
 });
 
-// Eski komutların aynen çalışabilmesi için veritabanı bağlantısı
 const database = getDatabase(firebaseApp);
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
