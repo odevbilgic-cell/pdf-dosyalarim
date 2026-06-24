@@ -104,19 +104,36 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             return res.json({ success: true, message: `⚠️ ${month}. Ay ${year} ekstresi zaten sistemde kayıtlı. Es geçildi!` });
         }
 
-        // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
-        const itemRegex = /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*TL/g;
+       // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
+        // ÇÖZÜM: \n (Alt satıra inme) durumlarını atlaması ve başka tarihlerin içine sızmaması için 
+        // muazzam güçlü bir Regex (Metin Tarayıcı) yazdık.
+        const itemRegex = /(\d{2}\/\d{2}\/\d{4})\s+((?:(?!\d{2}\/\d{2}\/\d{4})[\s\S])+?)\s+(-?\s*\d{1,3}(?:\.\d{3})*[,\.]\d{2})\s*TL/g;
         let match;
         const processedItems = {};
         let itemIndex = 0;
 
         while ((match = itemRegex.exec(text)) !== null) {
             const date = match[1].trim();
-            const desc = match[2].replace(/\n/g, ' ').trim();
+            
+            // Açıklama metni 2-3 satıra yayıldıysa (Enter varsa) onları tek satırda birleştir
+            const desc = match[2].replace(/\n|\r/g, ' ').replace(/\s+/g, ' ').trim();
             const amountStr = match[3];
             
-            const amount = parseFloat(amountStr.replace(/\./g, '').replace(',', '.'));
+            // 🎯 ÇÖZÜM 2: ENPARA KURUŞ FORMATI DÜZELTİCİ
+            // Bazen PDF'te 3.207,35 yerine 3.207.35 gelebiliyor. Bu zeki algoritma sondan 3. karakteri bulup kuruşu ayırır.
+            let rawAmount = amountStr.replace(/\s/g, ''); // Eksileri ve boşlukları bitişik yap
+            let chars = rawAmount.split('');
+            let sepIdx = chars.length - 3; // Sondan 3. karakter (Kuruş ayracı)
+            
+            if (chars[sepIdx] === ',' || chars[sepIdx] === '.') {
+                chars[sepIdx] = 'DECIMAL'; // Karışmasın diye geçici işaret koy
+            }
+            
+            // Kalan tüm binlik noktaları sil ve bizim işareti gerçek noktaya çevir
+            const cleanAmountStr = chars.join('').replace(/[.,]/g, '').replace('DECIMAL', '.');
+            const amount = parseFloat(cleanAmountStr);
 
+            // Eğer "Ödeme" veya "Bir önceki ekstre" satırlarıysa atla (Gider hesaplamıyoruz)
             if (desc.toLowerCase().includes('ödeme -') || desc.toLowerCase().includes('önceki ekstre')) continue;
 
             const descLower = desc.toLowerCase();
@@ -130,7 +147,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
                 descLower.includes('7040551588') ||
                 descLower.includes('faiz')
             ) {
-                assignedCategory = 'dukkan'; 
+                assignedCategory = 'dukkan'; // Eşleştiği an Dükkana fırlat!
             }
 
             processedItems[`item_${itemIndex}`] = {
@@ -144,7 +161,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         }
 
         if (itemIndex === 0) {
-            return res.json({ success: false, error: "PDF okundu ama içinde hiçbir harcama satırı bulunamadı. Lütfen regex veya metin formatını kontrol edin." });
+            return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı. Lütfen ekstreyi kontrol edin." });
         }
 
         // --- 6. FIREBASE'E İLK KEZ KAYDETME ---
