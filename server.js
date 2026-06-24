@@ -83,10 +83,15 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
 
         console.log("PDF %100 başarıyla ayıkladı. Yazılar okunuyor...");
 
-        // --- 3. YENİ NESİL PDF OKUMA MOTORU (V2 SÜRÜMÜNE ÖZEL) ---
-        const { PDFParse } = require('pdf-parse'); // YENİ: Parantez içinde özel çağırılır
-        const parser = new PDFParse({ data: pdfBuffer }); // YENİ: Sınıf olarak başlatılır
-        const pdfData = await parser.getRaw(); // YENİ: Veri Raw (Ham) olarak çekilir
+        // --- 3. YENİ NESİL PDF OKUMA MOTORU (ESM UYUMLU) ---
+        // ÇÖZÜM: Yeni paket ESM formatında olduğu için 'require' yerine dinamik 'import' ile çağırıp kutuyu açıyoruz!
+        const pdfParseModule = await import('pdf-parse');
+        
+        // Modülün içindeki asıl fonksiyonu yakalıyoruz (Garantili yöntem)
+        const parsePdf = pdfParseModule.default || pdfParseModule; 
+        
+        // PDF'i fonksiyona verip yazıları çekiyoruz
+        const pdfData = await parsePdf(pdfBuffer);
         const text = pdfData.text;
 
         // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026")
