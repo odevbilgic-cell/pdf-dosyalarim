@@ -1,10 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const admin = require('firebase-admin');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
 const pdf = require('pdf-parse');
+
+// 🎯 ÇÖZÜM: Firebase'in en yeni (Modüler) versiyonuna göre parçalayarak çağırıyoruz!
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -15,13 +18,18 @@ app.use(express.json());
 
 // --- 1. FIREBASE ADMIN KURULUMU ---
 // DİKKAT: Proje ayarlarından indirdiğin firebase-adminsdk.json dosyasını klasörüne koymalısın.
-// Veya Render ortam değişkenleri (ENV) üzerinden bağlamalısın.
-const serviceAccount = require('./firebase-adminsdk.json'); // JSON dosyasının yolu
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+const serviceAccount = require('./firebase-adminsdk.json'); 
+
+const firebaseApp = initializeApp({
+    credential: cert(serviceAccount),
     databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app"
 });
-const database = admin.database();
+
+// Eski komutların aynen çalışabilmesi için veritabanı bağlantısı
+const database = getDatabase(firebaseApp);
+
+// --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
+// (BU SATIRDAN AŞAĞISI SENDE ZATEN VAR, AYNEN KALSIN)
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
 const imapConfig = {
