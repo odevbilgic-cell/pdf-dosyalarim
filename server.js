@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const imaps = require('imap-simple');
 const simpleParser = require('mailparser').simpleParser;
-const pdf = require('pdf-parse');
+const pdfParse = require('pdf-parse');
 
 // 🎯 ÇÖZÜM: Firebase'in en yeni (Modüler) versiyonuna göre parçalayarak çağırıyoruz!
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -78,9 +78,17 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
 
         console.log("PDF Mailden başarıyla indirildi. Okunuyor...");
 
+      
+
         // --- 3. PDF'İ OKUMA VE YAZIYA ÇEVİRME ---
-        const pdfData = await pdf(partData);
+        // ÇÖZÜM: Mailden gelen dosyanın %100 Buffer (dijital ham veri) formatında olduğundan emin oluyoruz.
+        const bufferData = Buffer.isBuffer(partData) ? partData : Buffer.from(partData, 'binary');
+        
+        // ÇÖZÜM 2: İsim çakışması yapmaması için pdfParse adıyla çağırıyoruz.
+        const pdfData = await pdfParse(bufferData);
         const text = pdfData.text;
+
+        // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026")
 
         // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026") - Benzersiz ID yapmak için
         const dateMatch = text.match(/Ekstre tarihi\s*(\d{2}\/\d{2}\/\d{4})/);
