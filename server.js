@@ -45,8 +45,6 @@ const imapConfig = {
 };
 
 // --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
-// --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
-// --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
 app.post('/api/fetch-latest-ekstreler', async (req, res) => {
     try {
         console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
@@ -73,7 +71,6 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         // 2. ÇEVİRMEN İLE PDF'İ GERÇEK BUFFER'A ÇEVİR
         const parsedEmail = await simpleParser(rawEmailData);
         
-        // Eklentiler (Attachments) arasından PDF olanı bul
         const pdfAttachment = parsedEmail.attachments.find(att => att.contentType === 'application/pdf' || att.filename.endsWith('.pdf'));
         
         if (!pdfAttachment) {
@@ -81,52 +78,23 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         }
 
         const pdfBuffer = pdfAttachment.content; 
-
         console.log("PDF %100 başarıyla ayıkladı. Yazılar okunuyor...");
 
-        // --- 3. ZIRHLI PDF OKUMA MOTORU (AJAN SİSTEMİ) ---
-        // Dinamik içe aktarma ile kapalı kutuyu (modülü) alıyoruz
-        const pdfParseModule = await import('pdf-parse');
-        
-        // Kutunun içindeki asıl fonksiyonu yakalamak için zırhlı tarama:
-        let parsePdf = null;
-        if (typeof pdfParseModule === 'function') {
-            parsePdf = pdfParseModule;
-        } else if (typeof pdfParseModule.default === 'function') {
-            parsePdf = pdfParseModule.default;
-        } else if (typeof pdfParseModule.pdf === 'function') {
-            parsePdf = pdfParseModule.pdf;
-        } else if (typeof pdfParseModule.parse === 'function') {
-            parsePdf = pdfParseModule.parse;
-        } else {
-            // Hiçbiri değilse, kutunun içindeki tüm parçaları tarayıp ilk bulduğu "fonksiyonu" alır
-            for (let key in pdfParseModule) {
-                if (typeof pdfParseModule[key] === 'function') {
-                    parsePdf = pdfParseModule[key];
-                    break;
-                }
-            }
-        }
-
-        // Eğer ajan hiçbir şey bulamadıysa loglara kutunun içindekileri yazdırır
-        if (!parsePdf) {
-            console.log("Bulunan Kapalı Kutu (Modül) İçeriği:", Object.keys(pdfParseModule));
-            return res.json({ success: false, error: "PDF Okuyucu fonksiyonu bulunamadı. Kütüphane uyumsuz." });
-        }
-
-        // Bulduğumuz asıl fonksiyona PDF'i verip metni çekiyoruz!
-        const pdfData = await parsePdf(pdfBuffer);
+        // --- 3. DÜNYANIN EN STABİL PDF OKUMA MOTORU (v1.1.1) ---
+        // Artık eski usul, en güvenilir yöntemle çağırıyoruz!
+        const pdfParse = require('pdf-parse');
+        const pdfData = await pdfParse(pdfBuffer);
         const text = pdfData.text;
 
-        // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026")
-        const dateMatch = text.match(/Ekstre tarihi\s*(\d{2}\/\d{2}\/\d{4})/);
+        // Ekstre Tarihini ve Ayını bulmak (Farklı boşluklara karşı zırhlandırıldı)
+        const dateMatch = text.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
         if (!dateMatch) {
             return res.json({ success: false, error: "PDF formatı anlaşılamadı, ekstre tarihi bulunamıyor." });
         }
         
         const ekstreTarihiStr = dateMatch[1]; 
         const [, month, year] = ekstreTarihiStr.split('/');
-        const ekstreID = `${year}-${month}`; // "2026-06" 
+        const ekstreID = `${year}-${month}`; // "2026-06" (Firebase için benzersiz ID)
 
         // --- 4. FIREBASE DUPLİKASYON KONTROLÜ (Aynı Ayı Bir Daha Çekmeme) ---
         const dbRef = database.ref(`ekstreler/${ekstreID}`);
@@ -136,7 +104,6 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         }
 
         // --- 5. YAPAY ZEKA GİBİ SATIR AYRIŞTIRMA VE "EV/DÜKKAN" KATEGORİZASYONU ---
-        // Harcama satırlarını bulan Regex (Örn: 18/05/2026 TIKLA GELSIN 395,00 TL)
         const itemRegex = /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*TL/g;
         let match;
         const processedItems = {};
@@ -147,16 +114,14 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
             const desc = match[2].replace(/\n/g, ' ').trim();
             const amountStr = match[3];
             
-            // Türk Lirası formatını "1.240,50" -> 1240.50 Float'a çevir
             const amount = parseFloat(amountStr.replace(/\./g, '').replace(',', '.'));
 
-            // Eğer "Ödeme" veya "Bir önceki ekstre" satırlarıysa atla (Gider hesaplamıyoruz)
             if (desc.toLowerCase().includes('ödeme -') || desc.toLowerCase().includes('önceki ekstre')) continue;
 
             const descLower = desc.toLowerCase();
             let assignedCategory = 'ev'; // Varsayılan Şahsi Gider
 
-            // 🎯 SENİN İSTEDİĞİN DÜKKAN FİLTRELEME ŞARTLARI
+            // 🎯 DÜKKAN FİLTRELEME ŞARTLARI
             if (
                 descLower.includes('is net elektron') ||
                 descLower.includes('umraniye v.d') ||
@@ -164,7 +129,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
                 descLower.includes('7040551588') ||
                 descLower.includes('faiz')
             ) {
-                assignedCategory = 'dukkan'; // Eşleştiği an Dükkan'a fırlat!
+                assignedCategory = 'dukkan'; 
             }
 
             processedItems[`item_${itemIndex}`] = {
@@ -178,7 +143,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         }
 
         if (itemIndex === 0) {
-            return res.json({ success: false, error: "PDF okundu ama içinde hiçbir harcama satırı bulunamadı." });
+            return res.json({ success: false, error: "PDF okundu ama içinde hiçbir harcama satırı bulunamadı. Lütfen regex veya metin formatını kontrol edin." });
         }
 
         // --- 6. FIREBASE'E İLK KEZ KAYDETME ---
