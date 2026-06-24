@@ -46,6 +46,7 @@ const imapConfig = {
 
 // --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
 // --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
+// --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
 app.post('/api/fetch-latest-ekstreler', async (req, res) => {
     try {
         console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
@@ -83,14 +84,37 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
 
         console.log("PDF %100 başarıyla ayıkladı. Yazılar okunuyor...");
 
-        // --- 3. YENİ NESİL PDF OKUMA MOTORU (ESM UYUMLU) ---
-        // ÇÖZÜM: Yeni paket ESM formatında olduğu için 'require' yerine dinamik 'import' ile çağırıp kutuyu açıyoruz!
+        // --- 3. ZIRHLI PDF OKUMA MOTORU (AJAN SİSTEMİ) ---
+        // Dinamik içe aktarma ile kapalı kutuyu (modülü) alıyoruz
         const pdfParseModule = await import('pdf-parse');
         
-        // Modülün içindeki asıl fonksiyonu yakalıyoruz (Garantili yöntem)
-        const parsePdf = pdfParseModule.default || pdfParseModule; 
-        
-        // PDF'i fonksiyona verip yazıları çekiyoruz
+        // Kutunun içindeki asıl fonksiyonu yakalamak için zırhlı tarama:
+        let parsePdf = null;
+        if (typeof pdfParseModule === 'function') {
+            parsePdf = pdfParseModule;
+        } else if (typeof pdfParseModule.default === 'function') {
+            parsePdf = pdfParseModule.default;
+        } else if (typeof pdfParseModule.pdf === 'function') {
+            parsePdf = pdfParseModule.pdf;
+        } else if (typeof pdfParseModule.parse === 'function') {
+            parsePdf = pdfParseModule.parse;
+        } else {
+            // Hiçbiri değilse, kutunun içindeki tüm parçaları tarayıp ilk bulduğu "fonksiyonu" alır
+            for (let key in pdfParseModule) {
+                if (typeof pdfParseModule[key] === 'function') {
+                    parsePdf = pdfParseModule[key];
+                    break;
+                }
+            }
+        }
+
+        // Eğer ajan hiçbir şey bulamadıysa loglara kutunun içindekileri yazdırır
+        if (!parsePdf) {
+            console.log("Bulunan Kapalı Kutu (Modül) İçeriği:", Object.keys(pdfParseModule));
+            return res.json({ success: false, error: "PDF Okuyucu fonksiyonu bulunamadı. Kütüphane uyumsuz." });
+        }
+
+        // Bulduğumuz asıl fonksiyona PDF'i verip metni çekiyoruz!
         const pdfData = await parsePdf(pdfBuffer);
         const text = pdfData.text;
 
@@ -102,7 +126,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         
         const ekstreTarihiStr = dateMatch[1]; 
         const [, month, year] = ekstreTarihiStr.split('/');
-        const ekstreID = `${year}-${month}`; // "2026-06" (Firebase için benzersiz ID)
+        const ekstreID = `${year}-${month}`; // "2026-06" 
 
         // --- 4. FIREBASE DUPLİKASYON KONTROLÜ (Aynı Ayı Bir Daha Çekmeme) ---
         const dbRef = database.ref(`ekstreler/${ekstreID}`);
