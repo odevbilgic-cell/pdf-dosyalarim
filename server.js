@@ -44,16 +44,17 @@ const imapConfig = {
     }
 };
 
-// --- ANA ROTA: MAİLİ ÇEK, PDF'İ OKU, AYRIŞTIR VE KAYDET ---
+// --- ANA ROTA: MAİLİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'İ OKU VE KAYDET ---
 app.post('/api/fetch-latest-ekstreler', async (req, res) => {
     try {
         console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
         const connection = await imaps.connect(imapConfig);
         await connection.openBox('INBOX');
 
-        // KURAL: Kimden "enpara" olan ve konusunda "Ekstre" geçen en son mailleri ara
-        const searchCriteria = ['ALL', ['FROM', 'enpara'], ['SUBJECT', 'Ekstreniz']];
-        const fetchOptions = { bodies: ['HEADER.FIELDS (FROM TO SUBJECT DATE)', 'TEXT'], struct: true };
+        // 1. MAİLİ BUL (Senin ekran görüntündeki tam mail adresi ve konu)
+        const searchCriteria = ['ALL', ['FROM', 'enpara@enpara.com'], ['SUBJECT', 'ekstreniz']];
+        // ÇÖZÜM: Maili parça parça değil, tek bir ham paket olarak çekiyoruz ('')
+        const fetchOptions = { bodies: [''], markSeen: false }; 
         
         const messages = await connection.search(searchCriteria, fetchOptions);
         if (messages.length === 0) {
@@ -63,32 +64,30 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
 
         // En son (en yeni) maili alıyoruz
         const latestMessage = messages[messages.length - 1];
-        const parts = imaps.getParts(latestMessage.attributes.struct);
+        const rawEmailData = latestMessage.parts.find(part => part.which === '').body;
+        connection.end(); // Bağlantıyı kapatabiliriz
+
+        console.log("Mail bulundu. Çevirmen (Mailparser) PDF'i ayıklıyor...");
+
+        // 2. ÇEVİRMEN İLE PDF'İ GERÇEK BUFFER'A ÇEVİR
+        const parsedEmail = await simpleParser(rawEmailData);
         
-        // Ekleri bul
-        const attachments = parts.filter(part => part.disposition && part.disposition.type.toUpperCase() === 'ATTACHMENT');
-        if (attachments.length === 0) {
-            connection.end();
-            return res.json({ success: false, error: "Mail bulundu ama içinde PDF eki yok!" });
+        // Eklentiler (Attachments) arasından PDF olanı bul
+        const pdfAttachment = parsedEmail.attachments.find(att => att.contentType === 'application/pdf' || att.filename.endsWith('.pdf'));
+        
+        if (!pdfAttachment) {
+            return res.json({ success: false, error: "Mail bulundu ama içinde PDF eki tespit edilemedi!" });
         }
 
-        const attachment = attachments[0];
-        const partData = await connection.getPartData(latestMessage, attachment);
-        connection.end(); // Maille işimiz bitti, bağlantıyı kapat
+        // İşte şimdi elimizde %100 saf, gerçek bir dijital PDF verisi var (Buffer)
+        const pdfBuffer = pdfAttachment.content; 
 
-        console.log("PDF Mailden başarıyla indirildi. Okunuyor...");
-
-      
+        console.log("PDF %100 başarıyla ayıkladı. Yazılar okunuyor...");
 
         // --- 3. PDF'İ OKUMA VE YAZIYA ÇEVİRME ---
-        // ÇÖZÜM: Mailden gelen dosyanın %100 Buffer (dijital ham veri) formatında olduğundan emin oluyoruz.
-        const bufferData = Buffer.isBuffer(partData) ? partData : Buffer.from(partData, 'binary');
-        
-        // ÇÖZÜM 2: İsim çakışması yapmaması için pdfParse adıyla çağırıyoruz.
-        const pdfData = await pdfParse(bufferData);
+        const pdfParse = require('pdf-parse'); // Kütüphaneyi burada net olarak çağırıyoruz
+        const pdfData = await pdfParse(pdfBuffer);
         const text = pdfData.text;
-
-        // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026")
 
         // Ekstre Tarihini ve Ayını bulmak (Örn: "03/06/2026") - Benzersiz ID yapmak için
         const dateMatch = text.match(/Ekstre tarihi\s*(\d{2}\/\d{2}\/\d{4})/);
@@ -141,7 +140,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
 
             processedItems[`item_${itemIndex}`] = {
                 date: date,
-                time: '--:--', // PDF'lerde saat genellikle yazmaz
+                time: '--:--', 
                 desc: desc,
                 amount: amount,
                 category: assignedCategory
@@ -167,7 +166,7 @@ app.post('/api/fetch-latest-ekstreler', async (req, res) => {
         return res.json({ success: true, message: `✅ ${ayAdi} ${year} ekstreniz başarıyla Gmail'den çekildi, ${itemIndex} harcama Ev/Dükkan olarak ayrıştırılıp sisteme işlendi!` });
 
     } catch (error) {
-        console.error(error);
+        console.error("Beklenmeyen Hata:", error);
         return res.status(500).json({ success: false, error: error.message });
     }
 });
