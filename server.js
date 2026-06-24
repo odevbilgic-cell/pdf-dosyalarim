@@ -31,7 +31,6 @@ const firebaseApp = initializeApp({
 const database = getDatabase(firebaseApp);
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
-// (BU SATIRDAN AŞAĞISI SENDE ZATEN VAR, AYNEN KALSIN)
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
 const imapConfig = {
