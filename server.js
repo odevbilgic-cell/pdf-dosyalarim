@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const imaps = require("imap-simple");
 const simpleParser = require("mailparser").simpleParser;
-const pdfParse = require("pdf-parse"); // PDF okuyucu en üste eklendi
+const pdfParse = require("pdf-parse"); // PDF okuyucuyu en üste taşıdık!
 
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
@@ -49,12 +49,13 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     const connection = await imaps.connect(imapConfig);
     await connection.openBox("INBOX");
 
-    // ================================================================
-    // 1. KREDİ KARTI EKSTRESİ MAİLİNİ BUL (Senin Orijinal Kodun)
-    // ================================================================
+    // =======================================================================
+    // AŞAMA 1: KREDİ KARTI EKSTRESİNİ BUL VE İŞLE (Senin Orijinal Kodun)
+    // =======================================================================
     const searchCriteria = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "ekstreniz"]];
-    const messages = await connection.search(searchCriteria, { bodies: [""], markSeen: false });
-    
+    const fetchOptions = { bodies: [""], markSeen: false };
+
+    const messages = await connection.search(searchCriteria, fetchOptions);
     if (messages.length === 0) {
       connection.end();
       return res.json({ success: false, error: "Gelen kutusunda hiç Enpara ekstresi bulunamadı." });
@@ -63,30 +64,14 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     const latestMessage = messages[messages.length - 1];
     const rawEmailData = latestMessage.parts.find((part) => part.which === "").body;
 
-    // ================================================================
-    // 2. HESAP ÖZETİ MAİLİNİ BUL (YENİ EKLENEN KISIM)
-    // ================================================================
-    const ozetSearchCriteria = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "Hesap Özeti"]];
-    const ozetMessages = await connection.search(ozetSearchCriteria, { bodies: [""], markSeen: false });
-    
-    let rawOzetData = null;
-    if (ozetMessages.length > 0) {
-        // En son gelen hesap özeti mailini al
-        rawOzetData = ozetMessages[ozetMessages.length - 1].parts.find((part) => part.which === "").body;
-    }
-
-    connection.end(); // Bağlantıyı kapatabiliriz
-
-    console.log("Mailler bulundu. Çevirmen (Mailparser) PDF'i ayıklıyor...");
-
-    // ================================================================
-    // 3. KREDİ KARTI PDF'İNİ OKU VE FIREBASE KONTROLÜ YAP (Senin Orijinal Kodun)
-    // ================================================================
     const parsedEmail = await simpleParser(rawEmailData);
-    const pdfAttachment = parsedEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
+    const pdfAttachment = parsedEmail.attachments.find(
+      (att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"),
+    );
 
     if (!pdfAttachment) {
-      return res.json({ success: false, error: "Ekstre maili bulundu ama içinde PDF eki tespit edilemedi!" });
+      connection.end();
+      return res.json({ success: false, error: "Mail bulundu ama içinde PDF eki tespit edilemedi!" });
     }
 
     const pdfBuffer = pdfAttachment.content;
@@ -95,6 +80,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     const dateMatch = text.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
     if (!dateMatch) {
+      connection.end();
       return res.json({ success: false, error: "PDF formatı anlaşılamadı, ekstre tarihi bulunamıyor." });
     }
 
@@ -105,29 +91,27 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     const dbRef = database.ref(`ekstreler/${ekstreID}`);
     const snapshot = await dbRef.once("value");
     if (snapshot.exists()) {
+      connection.end();
       return res.json({ success: true, message: `⚠️ ${month}. Ay ${year} ekstresi zaten sistemde kayıtlı. Es geçildi!` });
     }
 
-    const processedItems = {};
-    let itemIndex = 0;
-
-    // ================================================================
-    // 4. KREDİ KARTI İŞLEME MOTORU (SENİN KUSURSUZ KODUN - HİÇ DOKUNULMADI)
-    // ================================================================
     const cleanText = text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
     const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
+
+    const processedItems = {};
+    let itemIndex = 0;
 
     parts.forEach((part) => {
       const partDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})/);
       if (!partDateMatch) return;
 
       const date = partDateMatch[1];
+
       const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
       if (amountMatches.length === 0) return;
 
       const lastAmountMatch = amountMatches[amountMatches.length - 1];
       const amountStr = lastAmountMatch[1];
-
       const desc = part.substring(date.length, lastAmountMatch.index).trim();
 
       if (desc.toLowerCase().includes("ödeme") || desc.toLowerCase().includes("önceki ekstre")) return;
@@ -144,6 +128,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       const descLower = desc.toLowerCase();
       let assignedCategory = "ev";
 
+      // SENİN DÜKKAN FİLTREN - DOKUNULMADI
       if (
         descLower.includes("is net elektron") ||
         descLower.includes("umraniye v.d") ||
@@ -166,23 +151,32 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       itemIndex++;
     });
 
-    // ================================================================
-    // 5. HESAP ÖZETİ MOTORU (YENİ EKLENDİ - SADECE SGK ÇEKER)
-    // ================================================================
-    if (rawOzetData) {
-        console.log("Hesap özeti maili işleniyor, sadece SGK aranacak...");
+    // =======================================================================
+    // AŞAMA 2: HESAP ÖZETİ MAİLİNİ BUL VE SADECE SGK'YI ÇEK (YENİ SİSTEM)
+    // =======================================================================
+    console.log("Kredi Kartı Ekstresi işlendi. Şimdi Hesap Özeti maili aranıyor...");
+    
+    // Konusunda "hesap özetiniz" geçen mailleri ara
+    const ozetSearchCriteria = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "hesap özetiniz"]];
+    const ozetMessages = await connection.search(ozetSearchCriteria, fetchOptions);
+
+    if (ozetMessages.length > 0) {
+        const latestOzetMsg = ozetMessages[ozetMessages.length - 1];
+        const rawOzetData = latestOzetMsg.parts.find((part) => part.which === "").body;
         const parsedOzetEmail = await simpleParser(rawOzetData);
-        const ozetPdfAtt = parsedOzetEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
         
+        const ozetPdfAtt = parsedOzetEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
+
         if (ozetPdfAtt) {
             const ozetPdfData = await pdfParse(ozetPdfAtt.content);
+            // Kart ekstresindeki aynı kusursuz boşluk silme yöntemini kullanıyoruz
             const cleanOzetText = ozetPdfData.text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
             
-            // Hesap özetinde tarihler (05/05/26) formatında kısa gelebilir
+            // Hesap özetinde tarihler (31/05/26) şeklinde kısa olabilir, o yüzden \d{2,4} kullanıyoruz
             const ozetParts = cleanOzetText.split(/(?=\d{2}\/\d{2}\/\d{2,4})/);
 
             ozetParts.forEach((part) => {
-                // KURAL: EĞER BU PARÇADA "SGK" KELİMESİ YOKSA HİÇ İŞLEME SOKMA!
+                // KURAL: Eğer satırda SGK yazmıyorsa hiç işleme sokma, atla!
                 if (!part.toLowerCase().includes("sgk")) return;
 
                 const ozetDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{2,4})/);
@@ -190,16 +184,18 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
                 const date = ozetDateMatch[1];
                 
-                // Hesap özetinde satırda birden fazla TL olabilir, bize her zaman ilki (işlem tutarı) lazım
-                const amountMatches = [...part.matchAll(/([\d]{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
+                // Hesap özeti PDF'inde 2 tane TL tutarı yazar (Biri çekilen tutar, diğeri kalan bakiye)
+                // Biz her zaman ILK parayı alıyoruz (Yani Çekilen Tutarı)
+                const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
                 if (amountMatches.length === 0) return;
 
                 const firstAmountMatch = amountMatches[0];
                 const amountStr = firstAmountMatch[1];
-
-                // Açıklama kısmı
+                
+                // Açıklama Metni (Örn: "Ödeme, 4A Prim Borcu SGK Ödemesi...")
                 let desc = part.substring(date.length, firstAmountMatch.index).trim();
-                desc = desc.replace(/^,?\s*Ödeme,?\s*/i, '').replace(/,\s*$/g, '').trim();
+                // Başındaki gereksiz virgülü silelim
+                desc = desc.replace(/^,\s*/, '').trim();
 
                 let rawAmount = amountStr.replace(/\s/g, "");
                 const kurusIndex = rawAmount.length - 3;
@@ -207,40 +203,46 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
                     rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
                 }
 
-                const amount = parseFloat(rawAmount);
+                // Tutar eksi (-) geldiği için Math.abs ile pozitife çevirip sisteme işliyoruz
+                const amount = Math.abs(parseFloat(rawAmount));
+                
                 if (!isNaN(amount)) {
-                    // Bulunan SGK bilgisini ANA LİSTEYE dahil ediyoruz
                     processedItems[`item_${itemIndex}`] = {
                         date: date,
-                        time: "Hesap Özeti", // Nereden çekildiğini görmek için
+                        time: "--:--",
                         desc: desc,
                         amount: amount,
-                        category: "dukkan", // KURAL: ZORUNLU DÜKKAN
+                        category: "dukkan", // 🚀 SADECE DÜKKAN GİDERİNE EKLENİR
                     };
                     itemIndex++;
                 }
             });
         }
+    } else {
+        console.log("Hesap özeti maili bulunamadı. Sadece kredi kartı ekstresi kaydedilecek.");
     }
 
-    // Eğer hiçbir satır bulunamazsa
+    // ARAMALAR BİTTİ, GMAIL KAPISINI KAPAT
+    connection.end();
+
     if (itemIndex === 0) {
-      return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı." });
+      console.log("HATA AYIKLAMA İÇİN METİN ÖRNEĞİ:", cleanText.substring(0, 800));
+      return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı. Lütfen Render loglarına bakın." });
     }
 
-    // ================================================================
-    // 6. FIREBASE'E KAYDETME (HER İKİSİNİN TOPLAMI)
-    // ================================================================
+    // =======================================================================
+    // AŞAMA 3: FIREBASE'E KAYDETME
+    // =======================================================================
     const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
     const ayAdi = ayIsimleri[parseInt(month) - 1];
 
     await dbRef.set({
-      title: `${ayAdi} ${year} Ekstre ve Özet`, // İkisinin birleştiği belli olsun
+      title: `${ayAdi} ${year} Enpara Ekstresi`,
       createdAt: Date.now(),
       items: processedItems,
     });
 
-    console.log(`Bitti! ${ayAdi} verileri Firebase'e başarıyla yazıldı.`);
+    console.log(`Bitti! ${ayAdi} ekstresi Firebase'e başarıyla yazıldı.`);
     return res.json({
       success: true,
       message: `✅ ${ayAdi} ${year} verileri başarıyla çekildi. Kredi Kartı ve SGK Harcamaları toplam ${itemIndex} kalem olarak sisteme işlendi!`,
