@@ -257,6 +257,185 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   }
 });
 
+// --- GEÇİCİ ROTA: OCAK 2026'DAN İTİBAREN GEÇMİŞİ ÇEKME MOTORU ---
+// Bu kodu işin bitince silebilirsin ustam!
+app.post("/api/fetch-gecmis", async (req, res) => {
+  try {
+    console.log("GEÇMİŞ TARAMA EMRİ ALINDI...");
+    const connection = await imaps.connect(imapConfig);
+    await connection.openBox("INBOX");
+
+    // 1 Ocak 2026'dan bugüne kadar gelen Enpara maillerini bul
+    const searchCriteria = [
+      ["FROM", "enpara@enpara.com"],
+      ["SINCE", "01-Jan-2026"]
+    ];
+    
+    const messages = await connection.search(searchCriteria, { bodies: [""], markSeen: false });
+    connection.end();
+
+    if (messages.length === 0) {
+      return res.json({ success: false, error: "Ocak 2026'dan bugüne Enpara maili bulunamadı." });
+    }
+
+    const allMonths = {};
+    let totalItemsAdded = 0;
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const rawEmail = messages[i].parts.find(p => p.which === "").body;
+        const mail = await simpleParser(rawEmail);
+        
+        if (!mail.subject) continue;
+        const subject = mail.subject.toLowerCase();
+        
+        if (!subject.includes("ekstreniz") && !subject.includes("hesap özeti")) continue;
+
+        const pdfAtt = mail.attachments.find(a => a.filename.endsWith('.pdf'));
+        if (!pdfAtt) continue;
+
+        const pdfData = await require("pdf-parse")(pdfAtt.content);
+        const text = pdfData.text;
+        const cleanText = text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
+
+        // --- KREDİ KARTI EKSTRESİ GEÇMİŞİ ---
+        if (subject.includes("ekstreniz")) {
+            const dateMatch = text.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
+            if (!dateMatch) continue;
+
+            const [, m, y] = dateMatch[1].split("/");
+            const ekstreID = `${y}-${m}`;
+            
+            if (!allMonths[ekstreID]) allMonths[ekstreID] = { items: {} };
+            const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+            allMonths[ekstreID].title = `${ayIsimleri[parseInt(m) - 1]} ${y} Enpara İşlemleri`;
+
+            const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
+            parts.forEach((part) => {
+                const partDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})/);
+                if (!partDateMatch) return;
+
+                const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
+                if (amountMatches.length === 0) return;
+
+                const lastAmountMatch = amountMatches[amountMatches.length - 1];
+                const amountStr = lastAmountMatch[1];
+                const desc = part.substring(partDateMatch[1].length, lastAmountMatch.index).trim();
+
+                if (desc.toLowerCase().includes("ödeme") || desc.toLowerCase().includes("önceki ekstre")) return;
+
+                let rawAmount = amountStr.replace(/\s/g, "");
+                const kurusIndex = rawAmount.length - 3;
+                if (rawAmount[kurusIndex] === "." || rawAmount[kurusIndex] === ",") {
+                    rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
+                }
+
+                const amount = parseFloat(rawAmount);
+                if (isNaN(amount)) return;
+
+                const descLower = desc.toLowerCase();
+                let assignedCategory = "ev";
+                if (descLower.includes("is net elektron") || descLower.includes("umraniye v.d") || descLower.includes("2163357920") || descLower.includes("7040551588") || descLower.includes("faiz") || descLower.includes("bsmv") || descLower.includes("kkdf")) {
+                    assignedCategory = "dukkan";
+                }
+
+                const crypto = require("crypto");
+                const itemId = "tx_" + crypto.createHash("md5").update(`${partDateMatch[1]}_${desc}_${amount}`).digest("hex");
+                
+                allMonths[ekstreID].items[itemId] = {
+                    date: partDateMatch[1],
+                    time: "--:--",
+                    desc: desc,
+                    amount: amount,
+                    category: assignedCategory
+                };
+                totalItemsAdded++;
+            });
+        }
+
+        // --- HESAP ÖZETİ (SGK) GEÇMİŞİ ---
+        if (subject.includes("hesap özeti")) {
+            const ozetParts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{2,4})/);
+            ozetParts.forEach((part) => {
+                if (!part.toLowerCase().includes("sgk")) return;
+
+                const ozetDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{2,4})/);
+                if (!ozetDateMatch) return;
+                
+                const date = ozetDateMatch[1];
+                const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
+                if (amountMatches.length === 0) return;
+
+                const firstAmountMatch = amountMatches[0];
+                const amountStr = firstAmountMatch[1];
+                
+                let desc = part.substring(date.length, firstAmountMatch.index).trim();
+                desc = desc.replace(/^,?\s*Ödeme,?\s*/i, '').replace(/,\s*$/g, '').trim();
+
+                let rawAmount = amountStr.replace(/\s/g, "");
+                const kurusIndex = rawAmount.length - 3;
+                if (rawAmount[kurusIndex] === "." || rawAmount[kurusIndex] === ",") {
+                    rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
+                }
+
+                const amount = Math.abs(parseFloat(rawAmount));
+                if (!isNaN(amount)) {
+                    // SENİN KURALIN: SGK MAYIS İSE -> HAZİRAN EKSTRESİNE GİRMELİ!
+                    let [, d, m, y] = date.match(/(\d{2})\/(\d{2})\/(\d{2,4})/);
+                    let monthInt = parseInt(m) + 1;
+                    let yearInt = y.length === 2 ? 2000 + parseInt(y) : parseInt(y);
+                    // Aralık'tan (12) Ocak'a (1) geçerken yılı 1 arttır
+                    if (monthInt > 12) { monthInt = 1; yearInt++; }
+                    
+                    const targetEkstreID = `${yearInt}-${String(monthInt).padStart(2, '0')}`;
+                    
+                    if (!allMonths[targetEkstreID]) allMonths[targetEkstreID] = { items: {} };
+
+                    const crypto = require("crypto");
+                    const itemId = "tx_" + crypto.createHash("md5").update(`${date}_${desc}_${amount}`).digest("hex");
+
+                    allMonths[targetEkstreID].items[itemId] = {
+                        date: date,
+                        time: "Hesap Özeti",
+                        desc: desc,
+                        amount: amount,
+                        category: "dukkan"
+                    };
+                    totalItemsAdded++;
+                }
+            });
+        }
+    }
+
+    // 3. FIREBASE'E TÜM GEÇMİŞİ TOPLUCA YAZ (Eski verileri silmez, üstüne ekler)
+    for (const [ekstreID, data] of Object.entries(allMonths)) {
+        const dbRef = database.ref(`ekstreler/${ekstreID}`);
+        const snapshot = await dbRef.once("value");
+        let existingData = snapshot.val() || {
+            title: data.title || "Geçmiş Enpara İşlemleri",
+            createdAt: Date.now(),
+            items: {}
+        };
+        
+        if (!existingData.items) existingData.items = {};
+
+        // Sadece daha önce eklenmemiş yeni harcamaları ekle
+        Object.keys(data.items).forEach(k => {
+            if (!existingData.items[k]) {
+                existingData.items[k] = data.items[k];
+            }
+        });
+
+        await dbRef.set(existingData);
+    }
+
+    res.json({ success: true, message: `✅ Geçmiş taranıp listeye eklendi! Toplam ${totalItemsAdded} kalem bulundu.` });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Olimpiyat Arka Uç (Backend) İşçisi ${PORT} portunda çalışıyor!`);
 });
