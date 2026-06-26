@@ -177,7 +177,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
             ozetParts.forEach((part) => {
                 // KURAL: Eğer satırda SGK yazmıyorsa hiç işleme sokma, atla!
-                if (!part.toLowerCase().includes("sgk")) return;
+                if (!part.toLowerCase().includes("4A Prim Borcu SGK Ödemesi")) return;
 
                 const ozetDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{2,4})/);
                 if (!ozetDateMatch) return;
