@@ -4,7 +4,7 @@ const cors = require("cors");
 const imaps = require("imap-simple");
 const simpleParser = require("mailparser").simpleParser;
 const pdfParse = require("pdf-parse");
-const crypto = require("crypto"); // Harcamaları benzersiz yapmak için şifreleme modülü (Node.js'de hazır gelir)
+const crypto = require("crypto");
 
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
@@ -42,17 +42,27 @@ const imapConfig = {
   },
 };
 
-// Benzersiz Harcama ID'si Üretici (Aynı harcamanın 2 kere eklenmesini sonsuza dek engeller)
-function generateItemId(date, desc, amount) {
-    return "tx_" + crypto.createHash("md5").update(`${date}_${desc}_${amount}`).digest("hex");
-}
-
 // --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
+  let connection; // Güvenli kapatma için dışarıda tanımladık
+
   try {
     console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
-    const connection = await imaps.connect(imapConfig);
+    connection = await imaps.connect(imapConfig);
     await connection.openBox("INBOX");
+
+    // 🎯 Klon Harcama Koruması (Aynı gün aynı fiyattan 2 tane varsa ezilmesini önler)
+    const generatedHashes = {};
+    function generateItemId(date, desc, amount) {
+        let baseHash = crypto.createHash("md5").update(`${date}_${desc}_${amount}`).digest("hex");
+        if (generatedHashes[baseHash]) {
+            generatedHashes[baseHash]++;
+            return `tx_${baseHash}_${generatedHashes[baseHash]}`;
+        } else {
+            generatedHashes[baseHash] = 1;
+            return `tx_${baseHash}_1`;
+        }
+    }
 
     // =======================================================================
     // AŞAMA 1: EN SON KREDİ KARTI EKSTRESİNİ BUL VE TARİHİNİ ÇIKAR
@@ -61,7 +71,6 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     const ekstreMessages = await connection.search(ekstreSearch, { bodies: [""], markSeen: false });
     
     if (ekstreMessages.length === 0) {
-      connection.end();
       return res.json({ success: false, error: "Gelen kutusunda hiç Enpara ekstresi bulunamadı." });
     }
 
@@ -71,7 +80,6 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     const ekstrePdfAtt = parsedEkstreEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
 
     if (!ekstrePdfAtt) {
-      connection.end();
       return res.json({ success: false, error: "Ekstre bulundu ama içinde PDF eki yok!" });
     }
 
@@ -80,15 +88,14 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     const dateMatch = ekstreText.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
     if (!dateMatch) {
-      connection.end();
       return res.json({ success: false, error: "Ekstre PDF formatı anlaşılamadı, tarih bulunamıyor." });
     }
 
-    const ekstreTarihiStr = dateMatch[1]; // Örn: 03/06/2026
+    const ekstreTarihiStr = dateMatch[1];
     const [, ekstreMonthStr, ekstreYearStr] = ekstreTarihiStr.split("/");
     const ekstreMonth = parseInt(ekstreMonthStr);
     const ekstreYear = parseInt(ekstreYearStr);
-    const ekstreID = `${ekstreYear}-${ekstreMonthStr}`; // Örn: "2026-06"
+    const ekstreID = `${ekstreYear}-${ekstreMonthStr}`;
 
     const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
     const ekstreAyAdi = ayIsimleri[ekstreMonth - 1];
@@ -98,43 +105,39 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     // =======================================================================
     let ozetMonth = ekstreMonth - 1;
     let ozetYear = ekstreYear;
-    if (ozetMonth === 0) { // Eğer ekstre Ocak ayıysa, hesap özeti bir önceki yılın Aralık ayıdır.
+    if (ozetMonth === 0) { 
         ozetMonth = 12;
         ozetYear -= 1;
     }
-    const ozetAyAdi = ayIsimleri[ozetMonth - 1]; // Örn: "Mayıs"
+    const ozetAyAdi = ayIsimleri[ozetMonth - 1];
 
-    console.log(`Eşleştirme: ${ekstreAyAdi} ${ekstreYear} ekstresi bulundu. Aranacak Ozet: ${ozetAyAdi} ${ozetYear}`);
+    console.log(`Eşleştirme: ${ekstreAyAdi} ${ekstreYear} ekstresi. Aranacak Ozet: ${ozetAyAdi} ${ozetYear}`);
 
-    // Tüm hesap özetlerini bul
     const ozetSearch = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "hesap"]];
     const ozetMessages = await connection.search(ozetSearch, { bodies: [""], markSeen: false });
     
     let targetOzetMailData = null;
     
-    // Bütün "hesap özeti" maillerini geriden (yeniden eskiye) tara, doğru ay ve yılı bul!
     for (let i = ozetMessages.length - 1; i >= 0; i--) {
         const msg = ozetMessages[i];
         const rawBody = msg.parts.find(p => p.which === "").body;
         const mail = await simpleParser(rawBody);
         
-        // Konu içinde "2026" ve "Mayıs" kelimeleri geçiyor mu kontrol et
-        const subject = mail.subject.toLowerCase();
-        if (subject.includes(ozetYear.toString()) && subject.includes(ozetAyAdi.toLowerCase())) {
+        // 🎯 Türkçe Karakter Çökme Koruması eklendi (toLocaleLowerCase)
+        const subject = mail.subject.toLocaleLowerCase('tr-TR');
+        if (subject.includes(ozetYear.toString()) && subject.includes(ozetAyAdi.toLocaleLowerCase('tr-TR'))) {
             targetOzetMailData = mail;
             console.log(`Eşleşen Hesap Özeti Maili Bulundu: ${mail.subject}`);
-            break; // Doğru maili bulduk, döngüden çık
+            break; 
         }
     }
-
-    connection.end(); // İşimiz bitti, Gmail'i kapat
 
     // =======================================================================
     // AŞAMA 3: İKİ PDF'İ DE AYIKLA VE LİSTEYİ HAZIRLA
     // =======================================================================
-    const newParsedItems = {}; // Firebase'e eklenecek taze liste
+    const newParsedItems = {};
 
-    // --- KREDİ KARTI EKSTRESİ MOTORU (Orijinal Kodun) ---
+    // --- KREDİ KARTI EKSTRESİ MOTORU ---
     const cleanEkstreText = ekstreText.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
     const ekstreParts = cleanEkstreText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
 
@@ -160,14 +163,13 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       const amount = parseFloat(rawAmount);
       if (isNaN(amount)) return;
 
-      const descLower = desc.toLowerCase();
+      const descLower = desc.toLocaleLowerCase('tr-TR');
       let assignedCategory = "ev";
 
       if (descLower.includes("is net elektron") || descLower.includes("umraniye v.d") || descLower.includes("2163357920") || descLower.includes("7040551588") || descLower.includes("faiz") || descLower.includes("bsmv") || descLower.includes("kkdf")) {
         assignedCategory = "dukkan";
       }
 
-      // Benzersiz ID oluşturarak listeye ekle
       const itemId = generateItemId(date, desc, amount);
       newParsedItems[itemId] = { date: date, time: "--:--", desc: desc, amount: amount, category: assignedCategory };
     });
@@ -181,7 +183,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
             const ozetParts = cleanOzetText.split(/(?=\d{2}\/\d{2}\/\d{2,4})/);
 
             ozetParts.forEach((part) => {
-                if (!part.toLowerCase().includes("sgk")) return; // SADECE SGK ÖDEMELERİ GEÇER
+                if (!part.toLocaleLowerCase('tr-TR').includes("sgk")) return;
 
                 const ozetDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{2,4})/);
                 if (!ozetDateMatch) return;
@@ -190,7 +192,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
                 const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
                 if (amountMatches.length === 0) return;
 
-                const firstAmountMatch = amountMatches[0]; // Hesap özetinde ilk para işlemi asıl tutardır
+                const firstAmountMatch = amountMatches[0];
                 const amountStr = firstAmountMatch[1];
                 
                 let desc = part.substring(date.length, firstAmountMatch.index).trim();
@@ -202,7 +204,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
                     rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
                 }
 
-                const amount = Math.abs(parseFloat(rawAmount)); // Tutarı eksi değerden kurtar pozitif yap
+                const amount = Math.abs(parseFloat(rawAmount));
                 
                 if (!isNaN(amount)) {
                     const itemId = generateItemId(date, desc, amount);
@@ -228,10 +230,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     let addedCount = 0;
     
-    // Bulunan yeni harcamaları Firebase'deki mevcut liste ile karşılaştır
     Object.keys(newParsedItems).forEach(key => {
-        // Eğer bu ID'ye sahip harcama zaten veritabanında YOKSA ekle.
-        // VARSA dokunma! (Böylece kullanıcının "ev/dükkan" manuel kategori değişiklikleri sıfırlanmaz)
         if (!currentEkstre.items[key]) {
             currentEkstre.items[key] = newParsedItems[key];
             addedCount++;
@@ -239,25 +238,27 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     });
 
     if (addedCount === 0) {
-        return res.json({ success: true, message: `⚠️ Postalar tarandı ancak eklenecek yeni bir SGK veya harcama bulunamadı. Hepsi zaten kayıtlı.` });
+        return res.json({ success: true, message: `⚠️ Postalar tarandı ancak eklenecek yeni bir harcama bulunamadı. Hepsi zaten kayıtlı.` });
     }
 
-    // Güncellenmiş listeyi kaydet
     await dbRef.set(currentEkstre);
 
     console.log(`Başarılı! Sisteme ${addedCount} yeni harcama eklendi.`);
     return res.json({
       success: true,
-      message: `✅ Başarılı! Sisteme ${addedCount} adet yeni işlem (Kredi Kartı + SGK) dahil edildi.`,
+      message: `✅ Başarılı! Sisteme ${addedCount} adet yeni işlem dahil edildi.`,
     });
 
   } catch (error) {
     console.error("Beklenmeyen Hata:", error);
     return res.status(500).json({ success: false, error: error.message });
+  } finally {
+    // 🎯 Güvenli Çıkış: Kod hata verse bile Gmail bağlantısını açık bırakmaz!
+    if (connection) {
+        connection.end();
+    }
   }
 });
-
-
 
 app.listen(PORT, () => {
   console.log(`🚀 Olimpiyat Arka Uç (Backend) İşçisi ${PORT} portunda çalışıyor!`);
