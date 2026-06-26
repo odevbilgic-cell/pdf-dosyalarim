@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const imaps = require("imap-simple");
 const simpleParser = require("mailparser").simpleParser;
-const pdfParse = require("pdf-parse"); // 🚀 EKSİKTİ, EKLENDİ! Yoksa sunucu çökerdi.
+const pdfParse = require("pdf-parse"); // PDF okuyucu en üste eklendi
 
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
@@ -11,20 +11,22 @@ const { getDatabase } = require("firebase-admin/database");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// İzinler
+// İzinler (Frontend sitenin bu arka kapıya erişebilmesi için)
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// --- 1. FIREBASE ADMIN KURULUMU ---
+// --- 1. FIREBASE ADMIN KURULUMU (GÜVENLİ KASA YÖNTEMİ) ---
 if (!process.env.FIREBASE_CREDENTIALS) {
   console.error("HATA: FIREBASE_CREDENTIALS Render'a eklenmemiş!");
 }
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+
 const firebaseApp = initializeApp({
   credential: cert(serviceAccount),
   databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app",
 });
+
 const database = getDatabase(firebaseApp);
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
@@ -35,92 +37,169 @@ const imapConfig = {
     host: "imap.gmail.com",
     port: 993,
     tls: true,
-    authTimeout: 5000,
+    authTimeout: 3000,
     tlsOptions: { rejectUnauthorized: false },
   },
 };
 
-// --- ANA ROTA: ÇİFT MOTORLU MAİL OKUYUCU ---
+// --- ANA ROTA: MAİLLERİ ÇEK, ÇEVİRMENDEN GEÇİR, PDF'LERİ OKU VE KAYDET ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   try {
-    console.log("Çekim emri alındı. Gmail aranıyor...");
+    console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
     const connection = await imaps.connect(imapConfig);
     await connection.openBox("INBOX");
 
-    // 1. Enpara'dan gelen tüm mailleri bul
-    const searchCriteria = ["ALL", ["FROM", "enpara@enpara.com"]];
+    // ================================================================
+    // 1. KREDİ KARTI EKSTRESİ MAİLİNİ BUL (Senin Orijinal Kodun)
+    // ================================================================
+    const searchCriteria = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "ekstreniz"]];
     const messages = await connection.search(searchCriteria, { bodies: [""], markSeen: false });
     
     if (messages.length === 0) {
       connection.end();
-      return res.json({ success: false, error: "Gelen kutusunda Enpara maili bulunamadı." });
+      return res.json({ success: false, error: "Gelen kutusunda hiç Enpara ekstresi bulunamadı." });
+    }
+
+    const latestMessage = messages[messages.length - 1];
+    const rawEmailData = latestMessage.parts.find((part) => part.which === "").body;
+
+    // ================================================================
+    // 2. HESAP ÖZETİ MAİLİNİ BUL (YENİ EKLENEN KISIM)
+    // ================================================================
+    const ozetSearchCriteria = ["ALL", ["FROM", "enpara@enpara.com"], ["SUBJECT", "Hesap Özeti"]];
+    const ozetMessages = await connection.search(ozetSearchCriteria, { bodies: [""], markSeen: false });
+    
+    let rawOzetData = null;
+    if (ozetMessages.length > 0) {
+        // En son gelen hesap özeti mailini al
+        rawOzetData = ozetMessages[ozetMessages.length - 1].parts.find((part) => part.which === "").body;
+    }
+
+    connection.end(); // Bağlantıyı kapatabiliriz
+
+    console.log("Mailler bulundu. Çevirmen (Mailparser) PDF'i ayıklıyor...");
+
+    // ================================================================
+    // 3. KREDİ KARTI PDF'İNİ OKU VE FIREBASE KONTROLÜ YAP (Senin Orijinal Kodun)
+    // ================================================================
+    const parsedEmail = await simpleParser(rawEmailData);
+    const pdfAttachment = parsedEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
+
+    if (!pdfAttachment) {
+      return res.json({ success: false, error: "Ekstre maili bulundu ama içinde PDF eki tespit edilemedi!" });
+    }
+
+    const pdfBuffer = pdfAttachment.content;
+    const pdfData = await pdfParse(pdfBuffer);
+    const text = pdfData.text;
+
+    const dateMatch = text.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
+    if (!dateMatch) {
+      return res.json({ success: false, error: "PDF formatı anlaşılamadı, ekstre tarihi bulunamıyor." });
+    }
+
+    const ekstreTarihiStr = dateMatch[1];
+    const [, month, year] = ekstreTarihiStr.split("/");
+    const ekstreID = `${year}-${month}`; // "2026-06" (Firebase için benzersiz ID)
+
+    const dbRef = database.ref(`ekstreler/${ekstreID}`);
+    const snapshot = await dbRef.once("value");
+    if (snapshot.exists()) {
+      return res.json({ success: true, message: `⚠️ ${month}. Ay ${year} ekstresi zaten sistemde kayıtlı. Es geçildi!` });
     }
 
     const processedItems = {};
     let itemIndex = 0;
-    let ekstreID = null;
-    let ayAdi = "";
 
-    // 2. TÜM MAİLLERİ TARA (Yeniden Eskiye Doğru)
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const rawEmail = messages[i].parts.find(p => p.which === "").body;
-        const mail = await simpleParser(rawEmail);
+    // ================================================================
+    // 4. KREDİ KARTI İŞLEME MOTORU (SENİN KUSURSUZ KODUN - HİÇ DOKUNULMADI)
+    // ================================================================
+    const cleanText = text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
+    const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
+
+    parts.forEach((part) => {
+      const partDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})/);
+      if (!partDateMatch) return;
+
+      const date = partDateMatch[1];
+      const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
+      if (amountMatches.length === 0) return;
+
+      const lastAmountMatch = amountMatches[amountMatches.length - 1];
+      const amountStr = lastAmountMatch[1];
+
+      const desc = part.substring(date.length, lastAmountMatch.index).trim();
+
+      if (desc.toLowerCase().includes("ödeme") || desc.toLowerCase().includes("önceki ekstre")) return;
+
+      let rawAmount = amountStr.replace(/\s/g, "");
+      const kurusIndex = rawAmount.length - 3;
+      if (rawAmount[kurusIndex] === "." || rawAmount[kurusIndex] === ",") {
+        rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
+      }
+
+      const amount = parseFloat(rawAmount);
+      if (isNaN(amount)) return;
+
+      const descLower = desc.toLowerCase();
+      let assignedCategory = "ev";
+
+      if (
+        descLower.includes("is net elektron") ||
+        descLower.includes("umraniye v.d") ||
+        descLower.includes("2163357920") ||
+        descLower.includes("7040551588") ||
+        descLower.includes("faiz") ||
+        descLower.includes("bsmv") ||
+        descLower.includes("kkdf")
+      ) {
+        assignedCategory = "dukkan";
+      }
+
+      processedItems[`item_${itemIndex}`] = {
+        date: date,
+        time: "--:--",
+        desc: desc,
+        amount: amount,
+        category: assignedCategory,
+      };
+      itemIndex++;
+    });
+
+    // ================================================================
+    // 5. HESAP ÖZETİ MOTORU (YENİ EKLENDİ - SADECE SGK ÇEKER)
+    // ================================================================
+    if (rawOzetData) {
+        console.log("Hesap özeti maili işleniyor, sadece SGK aranacak...");
+        const parsedOzetEmail = await simpleParser(rawOzetData);
+        const ozetPdfAtt = parsedOzetEmail.attachments.find((att) => att.contentType === "application/pdf" || att.filename.endsWith(".pdf"));
         
-        // Sadece Ekstre ve Hesap Özeti maillerini işleme sok, diğerlerini (reklam vb) atla
-        if (!mail.subject.includes("ekstreniz") && !mail.subject.includes("Hesap Özeti")) continue;
-
-        const pdfAtt = mail.attachments.find(a => a.filename.endsWith('.pdf'));
-        if (!pdfAtt) continue;
-
-        const pdfData = await pdfParse(pdfAtt.content);
-        const text = pdfData.text;
-
-        // --- TARİH TESPİTİ (Ekstre mailinden ay/yıl bilgisini koparır) ---
-        if (mail.subject.includes("ekstreniz") && !ekstreID) {
-            const dateMatch = text.match(/Ekstre tarihi[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
-            if (dateMatch) {
-                const [, m, y] = dateMatch[1].split("/");
-                ekstreID = `${y}-${m}`;
-                const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
-                ayAdi = ayIsimleri[parseInt(m) - 1];
-            }
-        }
-
-        // --- MOTOR 1: SGK VE HESAP ÖZETİ ---
-        if (text.includes("SGK Ödemesi") || text.includes("Hesap Özeti")) {
-            text.split('\n').forEach(line => {
-                if (line.toLowerCase().includes("sgk") || line.toLowerCase().includes("prim")) {
-                    const sgkMatch = line.match(/(.*SGK.*?)[\s]+([\d\.,]+)\s*TL/i);
-                    if (sgkMatch) {
-                        processedItems[`item_${itemIndex++}`] = {
-                            date: new Date().toLocaleDateString("tr-TR"), // Eklendiği günün tarihi
-                            time: "Otomatik SGK",
-                            desc: sgkMatch[1].trim(),
-                            amount: parseFloat(sgkMatch[2].replace(/\./g, "").replace(",", ".")),
-                            category: "dukkan" // 🚀 Doğrudan dükkana
-                        };
-                    }
-                }
-            });
-        }
-
-        // --- MOTOR 2: KREDİ KARTI EKSTRESİ ---
-        if (mail.subject.includes("ekstreniz")) {
-            const cleanText = text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
-            const parts = cleanText.split(/(?=\d{2}\/\d{2}\/\d{4})/);
+        if (ozetPdfAtt) {
+            const ozetPdfData = await pdfParse(ozetPdfAtt.content);
+            const cleanOzetText = ozetPdfData.text.replace(/["\n\r]/g, " ").replace(/\s{2,}/g, " ");
             
-            parts.forEach((part) => {
-                const dateMatch = part.match(/^(\d{2}\/\d{2}\/\d{4})/);
-                if (!dateMatch) return;
+            // Hesap özetinde tarihler (05/05/26) formatında kısa gelebilir
+            const ozetParts = cleanOzetText.split(/(?=\d{2}\/\d{2}\/\d{2,4})/);
 
-                const amountMatches = [...part.matchAll(/(-?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
+            ozetParts.forEach((part) => {
+                // KURAL: EĞER BU PARÇADA "SGK" KELİMESİ YOKSA HİÇ İŞLEME SOKMA!
+                if (!part.toLowerCase().includes("sgk")) return;
+
+                const ozetDateMatch = part.match(/^(\d{2}\/\d{2}\/\d{2,4})/);
+                if (!ozetDateMatch) return;
+
+                const date = ozetDateMatch[1];
+                
+                // Hesap özetinde satırda birden fazla TL olabilir, bize her zaman ilki (işlem tutarı) lazım
+                const amountMatches = [...part.matchAll(/([\d]{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*TL/gi)];
                 if (amountMatches.length === 0) return;
 
-                const lastAmountMatch = amountMatches[amountMatches.length - 1];
-                const amountStr = lastAmountMatch[1];
-                const desc = part.substring(dateMatch[1].length, lastAmountMatch.index).trim();
+                const firstAmountMatch = amountMatches[0];
+                const amountStr = firstAmountMatch[1];
 
-                if (desc.toLowerCase().includes("ödeme") || desc.toLowerCase().includes("önceki ekstre")) return;
+                // Açıklama kısmı
+                let desc = part.substring(date.length, firstAmountMatch.index).trim();
+                desc = desc.replace(/^,?\s*Ödeme,?\s*/i, '').replace(/,\s*$/g, '').trim();
 
                 let rawAmount = amountStr.replace(/\s/g, "");
                 const kurusIndex = rawAmount.length - 3;
@@ -128,60 +207,47 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
                     rawAmount = rawAmount.substring(0, kurusIndex).replace(/[.,]/g, "") + "." + rawAmount.substring(kurusIndex + 1);
                 }
 
-                const descLower = desc.toLowerCase();
-                let assignedCategory = "ev";
-
-                // 🚀 EKSİKSİZ DÜKKAN FİLTREN BURADA
-                if (
-                    descLower.includes("is net elektron") ||
-                    descLower.includes("umraniye v.d") ||
-                    descLower.includes("2163357920") ||
-                    descLower.includes("7040551588") ||
-                    descLower.includes("faiz") ||
-                    descLower.includes("bsmv") ||
-                    descLower.includes("kkdf")
-                ) {
-                    assignedCategory = "dukkan";
+                const amount = parseFloat(rawAmount);
+                if (!isNaN(amount)) {
+                    // Bulunan SGK bilgisini ANA LİSTEYE dahil ediyoruz
+                    processedItems[`item_${itemIndex}`] = {
+                        date: date,
+                        time: "Hesap Özeti", // Nereden çekildiğini görmek için
+                        desc: desc,
+                        amount: amount,
+                        category: "dukkan", // KURAL: ZORUNLU DÜKKAN
+                    };
+                    itemIndex++;
                 }
-
-                processedItems[`item_${itemIndex++}`] = {
-                    date: dateMatch[1],
-                    time: "--:--",
-                    desc: desc,
-                    amount: parseFloat(rawAmount),
-                    category: assignedCategory,
-                };
             });
         }
     }
-    connection.end(); // İş bitti, Gmail kapısını kapat
 
-    // Eğer sistem Kredi Kartı Ekstresi bulamadıysa (sadece Hesap Özeti varsa) yılı ve ayı bugünden al
-    if (!ekstreID) {
-        const now = new Date();
-        const y = now.getFullYear();
-        const m = String(now.getMonth() + 1).padStart(2, '0');
-        ekstreID = `${y}-${m}`;
-        const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
-        ayAdi = ayIsimleri[now.getMonth()];
-    }
-
+    // Eğer hiçbir satır bulunamazsa
     if (itemIndex === 0) {
-        return res.json({ success: false, error: "Ekstreler okundu ama harcama bulunamadı." });
+      return res.json({ success: false, error: "Node.js Hatası: PDF okundu ama harcama bulunamadı." });
     }
 
-    // FİREBASE'E TEK SEFERDE BİRLEŞİK YAZ
-    await database.ref(`ekstreler/${ekstreID}`).set({
-        title: `${ayAdi} Enpara İşlemleri`,
-        createdAt: Date.now(),
-        items: processedItems,
+    // ================================================================
+    // 6. FIREBASE'E KAYDETME (HER İKİSİNİN TOPLAMI)
+    // ================================================================
+    const ayIsimleri = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+    const ayAdi = ayIsimleri[parseInt(month) - 1];
+
+    await dbRef.set({
+      title: `${ayAdi} ${year} Ekstre ve Özet`, // İkisinin birleştiği belli olsun
+      createdAt: Date.now(),
+      items: processedItems,
     });
 
-    console.log("Firebase yazma işlemi başarılı!");
-    res.json({ success: true, message: `✅ ${ayAdi} ayına ait Kredi Kartı ve Hesap Özeti başarıyla çekilip birleştirildi!` });
+    console.log(`Bitti! ${ayAdi} verileri Firebase'e başarıyla yazıldı.`);
+    return res.json({
+      success: true,
+      message: `✅ ${ayAdi} ${year} verileri başarıyla çekildi. Kredi Kartı ve SGK Harcamaları toplam ${itemIndex} kalem olarak sisteme işlendi!`,
+    });
   } catch (error) {
     console.error("Beklenmeyen Hata:", error);
-    res.status(500).json({ success: false, error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
