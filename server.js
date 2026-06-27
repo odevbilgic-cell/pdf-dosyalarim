@@ -170,9 +170,9 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       descLower.includes("is net") || 
         descLower.includes("ıs net") || 
         descLower.includes("iş net") ||
-        descLower.includes("umraniye") || 
-        descLower.includes("umranıye") || 
-        descLower.includes("ümraniye") ||
+        descLower.includes("umraniye v.d") || 
+        descLower.includes("umranıye v.d") || 
+        descLower.includes("ümraniye v.d") ||
         descLower.includes("2163357920") ||
         descLower.includes("7040551588") ||
         descLower.includes("faiz") ||
