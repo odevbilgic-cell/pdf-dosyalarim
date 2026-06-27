@@ -44,14 +44,14 @@ const imapConfig = {
 
 // --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
-  let connection; // Güvenli kapatma için dışarıda tanımladık
+  let connection; 
 
   try {
     console.log("Ekstre çekim emri alındı. Gmail'e bağlanılıyor...");
     connection = await imaps.connect(imapConfig);
     await connection.openBox("INBOX");
 
-    // 🎯 Klon Harcama Koruması (Aynı gün aynı fiyattan 2 tane varsa ezilmesini önler)
+    // 🎯 Klon Harcama Koruması (Aynı gün aynı fiyattan 2 harcama varsa ezilmesini önler)
     const generatedHashes = {};
     function generateItemId(date, desc, amount) {
         let baseHash = crypto.createHash("md5").update(`${date}_${desc}_${amount}`).digest("hex");
@@ -123,7 +123,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
         const rawBody = msg.parts.find(p => p.which === "").body;
         const mail = await simpleParser(rawBody);
         
-        // 🎯 Türkçe Karakter Çökme Koruması eklendi (toLocaleLowerCase)
+        // Türkçe karakter korumalı eşleştirme
         const subject = mail.subject.toLocaleLowerCase('tr-TR');
         if (subject.includes(ozetYear.toString()) && subject.includes(ozetAyAdi.toLocaleLowerCase('tr-TR'))) {
             targetOzetMailData = mail;
@@ -228,8 +228,19 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     if (!currentEkstre.items) currentEkstre.items = {};
 
+    // 🧹 ÇÖP TEMİZLİĞİ: Eski "item_1", "item_2" gibi verileri temizle!
+    // Manuel eklediğin (-N... başlayanlar) asla silinmez.
+    let cleanedOldData = false;
+    Object.keys(currentEkstre.items).forEach(key => {
+        if (key.startsWith("item_")) {
+            delete currentEkstre.items[key];
+            cleanedOldData = true;
+        }
+    });
+
     let addedCount = 0;
     
+    // Bulunan yeni harcamaları listeye ekle
     Object.keys(newParsedItems).forEach(key => {
         if (!currentEkstre.items[key]) {
             currentEkstre.items[key] = newParsedItems[key];
@@ -237,23 +248,23 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
         }
     });
 
-    if (addedCount === 0) {
+    // Eğer ne eski çöp temizlendiyse ne de yeni veri eklendiyse
+    if (addedCount === 0 && !cleanedOldData) {
         return res.json({ success: true, message: `⚠️ Postalar tarandı ancak eklenecek yeni bir harcama bulunamadı. Hepsi zaten kayıtlı.` });
     }
 
     await dbRef.set(currentEkstre);
 
-    console.log(`Başarılı! Sisteme ${addedCount} yeni harcama eklendi.`);
+    console.log(`Başarılı! Sisteme ${addedCount} yeni harcama eklendi ve varsa eski çöpler temizlendi.`);
     return res.json({
       success: true,
-      message: `✅ Başarılı! Sisteme ${addedCount} adet yeni işlem dahil edildi.`,
+      message: `✅ Başarılı! Sistem temizlendi ve ${addedCount} adet yeni işlem dahil edildi.`,
     });
 
   } catch (error) {
     console.error("Beklenmeyen Hata:", error);
     return res.status(500).json({ success: false, error: error.message });
   } finally {
-    // 🎯 Güvenli Çıkış: Kod hata verse bile Gmail bağlantısını açık bırakmaz!
     if (connection) {
         connection.end();
     }
