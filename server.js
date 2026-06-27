@@ -166,7 +166,18 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       const descLower = desc.toLocaleLowerCase('tr-TR');
       let assignedCategory = "ev";
 
-      if (descLower.includes("MOKA U /IS NET ELEKTRON") || descLower.includes("UMRANIYE V.D") || descLower.includes("2163357920") || descLower.includes("7040551588") || descLower.includes("faiz") || descLower.includes("bsmv") || descLower.includes("kkdf")) {
+      if (descLower.includes("MOKA U /IS NET ELEKTRON") || 
+      descLower.includes("UMRANIYE V.D") || 
+      descLower.includes("ıs net elektron") || // Noktasız 'ı' ihtimali
+      descLower.includes("iş net") ||
+      descLower.includes("umraniye V.D") || 
+      descLower.includes("umranıye V.D") || // Noktasız 'ı' ihtimali
+      descLower.includes("ümraniye V.D") ||
+      descLower.includes("2163357920") ||
+      descLower.includes("7040551588") ||
+      descLower.includes("faiz") ||
+      descLower.includes("bsmv") ||
+      descLower.includes("kkdf")) {
         assignedCategory = "dukkan";
       }
 
