@@ -166,7 +166,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
       const descLower = desc.toLocaleLowerCase('tr-TR');
       let assignedCategory = "ev";
 
-      if (descLower.includes("is net elektron") || descLower.includes("umraniye v.d") || descLower.includes("2163357920") || descLower.includes("7040551588") || descLower.includes("faiz") || descLower.includes("bsmv") || descLower.includes("kkdf")) {
+      if (descLower.includes("MOKA U /IS NET ELEKTRON") || descLower.includes("UMRANIYE V.D") || descLower.includes("2163357920") || descLower.includes("7040551588") || descLower.includes("faiz") || descLower.includes("bsmv") || descLower.includes("kkdf")) {
         assignedCategory = "dukkan";
       }
 
