@@ -55,7 +55,7 @@ const imapConfig = {
 };
 
 // =================================================================================
-// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Terminatör Scraper)
+// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Terminatör Scraper - Kesin Sürüm)
 // =================================================================================
 app.post("/api/fetch-ys-prices", async (req, res) => {
     let browser;
@@ -85,7 +85,6 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
         console.log("📜 Sayfa aşağı kaydırılıyor (Tüm ürünlerin yüklenmesi için)...");
-        // Sayfanın en altına kadar yavaşça kaydır (Lazy load ürünlerin yüklenmesi için)
         await page.evaluate(async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
@@ -98,79 +97,46 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
                         clearInterval(timer);
                         resolve();
                     }
-                }, 150); // Her 150ms'de bir kaydır
+                }, 150);
             });
         });
 
-        // Ürünlerin tam belirmesi için fazladan 2 saniye bekle
         await new Promise(r => setTimeout(r, 2000));
-
         console.log("🧹 Ürünler ve Fiyatlar toplanıyor...");
         
-        // Zeki Kazıma (Scraping) Algoritması - YENİ YEMEKSEPETİ DOM YAPISINA GÖRE GÜNCELLENDİ
+        // Zeki Kazıma (Scraping) Algoritması (Lazer Hedefleme)
         const scrapedData = await page.evaluate(() => {
             const results = {};
             
-            // Tüm ürün kartlarını bul (Gönderilen HTML'e göre data-testid="menu-product" kullanılmış)
-            const productCards = document.querySelectorAll('li[data-testid="menu-product"], div[data-testid="menu-product"]');
+            // Tüm ürün kartlarını bul
+            const listItems = document.querySelectorAll('li[data-testid="menu-product"]');
             
-            productCards.forEach(card => {
-                // 1. Ürün İsmini Yakala
-                const nameEl = card.querySelector('[data-testid="menu-product-name"]');
-                let name = "";
-                if (nameEl) {
-                    name = nameEl.innerText.trim();
-                } else {
-                    // Eğer testid yoksa alternatif başlık arayışı
-                    const h3 = card.querySelector('h3.product-tile__title');
-                    if (h3) name = h3.innerText.trim();
-                }
+            listItems.forEach(item => {
+                // 1. İSMİ BUL
+                const nameSpan = item.querySelector('span[data-testid="menu-product-name"]');
+                if (!nameSpan) return;
+                const name = nameSpan.innerText.trim();
 
-                // 2. Ürün Fiyatını Yakala
-                const priceEl = card.querySelector('[data-testid="menu-product-price"]');
-                let price = 0;
+                // 2. FİYATI BUL (SADECE ANA FİYAT)
+                const priceContainer = item.querySelector('p[data-testid="menu-product-price"]');
+                if (!priceContainer) return;
+
+                // İçindeki üstü çizili indirimli fiyat etiketini bul (Eski Fiyat)
+                const strikeSpan = priceContainer.querySelector('.strike-through, [data-testid="menu-product-price-before-discount"]');
                 
-                if (priceEl) {
-                    // İçindeki eski/üzeri çizili fiyatları (<span class="strike-through">) hesaba katmamak için sadece ana text nodelarını al
-                    let rawPriceText = "";
-                    priceEl.childNodes.forEach(node => {
-                        // Sadece metin düğümlerini al (element düğümlerini yani üzeri çizili fiyatları es geç)
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            rawPriceText += node.textContent;
-                        }
-                    });
-                    
-                    // Rakamları ve virgülü/noktayı çek
-                    const priceMatch = rawPriceText.match(/(\d+(?:[.,]\d+)?)/);
-                    if (priceMatch) {
-                        price = parseFloat(priceMatch[1].replace(',', '.'));
-                    }
+                // Eğer eski fiyat etiketi varsa, onu okuma anında metinden "söküp at" ki kafa karıştırmasın
+                if (strikeSpan) {
+                    strikeSpan.remove(); 
                 }
 
-                if (name && price > 0) {
-                    results[name] = price;
+                // Geriye sadece asıl fiyat kaldı (Örn: "440 TL")
+                const cleanPriceText = priceContainer.innerText.trim();
+                const priceMatch = cleanPriceText.match(/(\d+(?:[.,]\d+)?)/);
+                
+                if (name && priceMatch) {
+                    results[name] = parseFloat(priceMatch[1].replace(',', '.'));
                 }
             });
-
-            // Yöntem 2: Eğer liste boş dönerse (Platform tekrar tasarım değiştirirse yedek sistem)
-            if (Object.keys(results).length === 0) {
-                const altNames = document.querySelectorAll('h3');
-                altNames.forEach(h3 => {
-                    const name = h3.innerText.trim();
-                    let parent = h3.parentElement;
-                    for (let i = 0; i < 3; i++) {
-                        if (!parent) break;
-                        const text = parent.innerText;
-                        // Üzeri çizili fiyatları pas geçmek için genellikle ilk rakamı hedefler
-                        const match = text.match(/(?:^|\s)(\d+(?:[.,]\d{2})?)\s*(?:TL|₺)/i);
-                        if (match && name.length > 3) {
-                            results[name] = parseFloat(match[1].replace(',', '.'));
-                            break;
-                        }
-                        parent = parent.parentElement;
-                    }
-                });
-            }
 
             return results;
         });
@@ -191,6 +157,7 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         return res.status(500).json({ success: false, error: error.message });
     }
 });
+// =================================================================================
 // =================================================================================
 
 // --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU (EKSTRE İÇİN) ---
