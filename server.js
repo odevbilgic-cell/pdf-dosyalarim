@@ -6,6 +6,11 @@ const simpleParser = require("mailparser").simpleParser;
 const pdfParse = require("pdf-parse");
 const crypto = require("crypto");
 
+// 🕷️ YENİ BOT KÜTÜPHANELERİ
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
 
@@ -20,14 +25,21 @@ if (!process.env.FIREBASE_CREDENTIALS) {
   console.error("HATA: FIREBASE_CREDENTIALS Render'a eklenmemiş!");
 }
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+// Güvenli başlatma (Render.com ortamında json hatasını önler)
+let serviceAccount;
+try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+} catch(e) {
+    console.error("Firebase Key JSON formatında değil veya eksik!", e);
+}
 
-const firebaseApp = initializeApp({
-  credential: cert(serviceAccount),
-  databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app",
-});
-
-const database = getDatabase(firebaseApp);
+if(serviceAccount) {
+    initializeApp({
+      credential: cert(serviceAccount),
+      databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app",
+    });
+}
+const database = getDatabase();
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
 const imapConfig = {
@@ -42,7 +54,110 @@ const imapConfig = {
   },
 };
 
-// --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU ---
+// =================================================================================
+// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Scraper)
+// =================================================================================
+app.post("/api/fetch-ys-prices", async (req, res) => {
+    let browser;
+    try {
+        console.log("🍔 Yemeksepeti Botu Uyandı. Fiyatlar süzülüyor...");
+        
+        const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
+
+        // Render.com vb. bulut sunucularda Puppeteer'ın çalışabilmesi için kritik argümanlar
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu'
+            ],
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Render'da Chrome yolu gerekebilir
+        });
+
+        const page = await browser.newPage();
+        
+        // Site bizi bot sanmasın diye rastgele bir ekran boyutu ve gerçekçi davranma ayarları
+        await page.setViewport({ width: 1366, height: 768 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
+
+        console.log("🔗 Adrese gidiliyor...");
+        // Sayfanın tamamen yüklenmesini (ağın sakinleşmesini) bekle
+        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        console.log("🧹 Ürünler ve Fiyatlar toplanıyor...");
+        
+        // Sayfa içindeki JavaScript'i çalıştırıp isimleri ve fiyatları avla
+        const scrapedData = await page.evaluate(() => {
+            const results = {};
+            
+            // Yemeksepeti'nin güncel tasarımında ürünleri tutan kapsayıcılar genelde li veya div olur
+            // Ürün isimleri genelde h3 tagı içinde olur, fiyatlar ise özel class'lı span'larda bulunur.
+            // Yemeksepeti'nin DOM yapısı sık değişebilir, en yaygın ve genel süzme mantığı kullanılmıştır.
+            
+            const productCards = Array.from(document.querySelectorAll('[data-testid="menu-product"]'));
+            
+            if(productCards.length === 0) {
+                // Eğer data-testid yoksa genel bir listeleme mantığı dene
+                const altCards = Array.from(document.querySelectorAll('.item-info')); // Örnek class
+                altCards.forEach(card => {
+                    const nameEl = card.querySelector('h3') || card.querySelector('.name');
+                    const priceEl = card.querySelector('.price') || card.querySelector('span[data-testid="menu-product-price"]');
+                    
+                    if (nameEl && priceEl) {
+                        const name = nameEl.innerText.trim().toLowerCase();
+                        // Fiyat metninden (örn: "250,00 TL") rakam kısmını çek
+                        const priceText = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
+                        const price = parseFloat(priceText);
+                        
+                        if (name && !isNaN(price)) {
+                            results[name] = price;
+                        }
+                    }
+                });
+            } else {
+                productCards.forEach(card => {
+                    const nameEl = card.querySelector('h3');
+                    const priceEl = card.querySelector('[data-testid="menu-product-price"]');
+                    
+                    if (nameEl && priceEl) {
+                        const name = nameEl.innerText.trim().toLowerCase();
+                        const priceText = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
+                        const price = parseFloat(priceText);
+                        
+                        if (name && !isNaN(price)) {
+                            results[name] = price;
+                        }
+                    }
+                });
+            }
+
+            return results;
+        });
+
+        console.log(`✅ İşlem Tamam. Toplam ${Object.keys(scrapedData).length} ürün çekildi.`);
+
+        // Tarayıcıyı kapat ve veriyi front-end'e (Admin Panele) gönder
+        await browser.close();
+        
+        return res.json({ 
+            success: true, 
+            message: "Fiyatlar başarıyla çekildi.",
+            data: scrapedData 
+        });
+
+    } catch (error) {
+        console.error("❌ Bot Hatası:", error);
+        if (browser) await browser.close();
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+// =================================================================================
+
+
+// --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU (EKSTRE İÇİN) ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   let connection; 
 
@@ -239,8 +354,6 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     if (!currentEkstre.items) currentEkstre.items = {};
 
-    // 🧹 ÇÖP TEMİZLİĞİ: Eski "item_1", "item_2" gibi verileri temizle!
-    // Manuel eklediğin (-N... başlayanlar) asla silinmez.
     let cleanedOldData = false;
     Object.keys(currentEkstre.items).forEach(key => {
         if (key.startsWith("item_")) {
@@ -251,7 +364,6 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     let addedCount = 0;
     
-    // Bulunan yeni harcamaları listeye ekle
     Object.keys(newParsedItems).forEach(key => {
         if (!currentEkstre.items[key]) {
             currentEkstre.items[key] = newParsedItems[key];
@@ -259,7 +371,6 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
         }
     });
 
-    // Eğer ne eski çöp temizlendiyse ne de yeni veri eklendiyse
     if (addedCount === 0 && !cleanedOldData) {
         return res.json({ success: true, message: `⚠️ Postalar tarandı ancak eklenecek yeni bir harcama bulunamadı. Hepsi zaten kayıtlı.` });
     }
