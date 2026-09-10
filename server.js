@@ -55,7 +55,7 @@ const imapConfig = {
 };
 
 // =================================================================================
-// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Scraper)
+// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Terminatör Scraper)
 // =================================================================================
 app.post("/api/fetch-ys-prices", async (req, res) => {
     let browser;
@@ -64,7 +64,6 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         
         const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
 
-        // Render.com vb. bulut sunucularda Puppeteer'ın çalışabilmesi için kritik argümanlar
         browser = await puppeteer.launch({
             headless: 'new',
             args: [
@@ -72,63 +71,85 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-accelerated-2d-canvas',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--window-size=1920x1080'
             ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null // Render'da Chrome yolu gerekebilir
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null 
         });
 
         const page = await browser.newPage();
-        
-        // Site bizi bot sanmasın diye rastgele bir ekran boyutu ve gerçekçi davranma ayarları
-        await page.setViewport({ width: 1366, height: 768 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
         console.log("🔗 Adrese gidiliyor...");
-        // Sayfanın tamamen yüklenmesini (ağın sakinleşmesini) bekle
         await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        console.log("📜 Sayfa aşağı kaydırılıyor (Tüm ürünlerin yüklenmesi için)...");
+        // Sayfanın en altına kadar yavaşça kaydır (Lazy load ürünlerin yüklenmesi için)
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let totalHeight = 0;
+                let distance = 300;
+                let timer = setInterval(() => {
+                    let scrollHeight = document.body.scrollHeight;
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+                    if(totalHeight >= scrollHeight - window.innerHeight){
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 150); // Her 150ms'de bir kaydır
+            });
+        });
+
+        // Ürünlerin tam belirmesi için fazladan 2 saniye bekle
+        await new Promise(r => setTimeout(r, 2000));
 
         console.log("🧹 Ürünler ve Fiyatlar toplanıyor...");
         
-        // Sayfa içindeki JavaScript'i çalıştırıp isimleri ve fiyatları avla
+        // Zeki Kazıma (Scraping) Algoritması
         const scrapedData = await page.evaluate(() => {
             const results = {};
             
-            // Yemeksepeti'nin güncel tasarımında ürünleri tutan kapsayıcılar genelde li veya div olur
-            // Ürün isimleri genelde h3 tagı içinde olur, fiyatlar ise özel class'lı span'larda bulunur.
-            // Yemeksepeti'nin DOM yapısı sık değişebilir, en yaygın ve genel süzme mantığı kullanılmıştır.
+            // Yöntem 1: Standart Data Test ID (Yemeksepeti güncel yapısı)
+            const listItems = document.querySelectorAll('[data-testid="menu-product"]');
             
-            const productCards = Array.from(document.querySelectorAll('[data-testid="menu-product"]'));
-            
-            if(productCards.length === 0) {
-                // Eğer data-testid yoksa genel bir listeleme mantığı dene
-                const altCards = Array.from(document.querySelectorAll('.item-info')); // Örnek class
-                altCards.forEach(card => {
-                    const nameEl = card.querySelector('h3') || card.querySelector('.name');
-                    const priceEl = card.querySelector('.price') || card.querySelector('span[data-testid="menu-product-price"]');
+            if (listItems.length > 0) {
+                listItems.forEach(item => {
+                    // İsim h3, h4 veya p olabilir
+                    const nameEl = item.querySelector('h3, h4, [data-testid="menu-product-name"]');
+                    const priceEl = item.querySelector('[data-testid="menu-product-price"]');
                     
                     if (nameEl && priceEl) {
-                        const name = nameEl.innerText.trim().toLowerCase();
-                        // Fiyat metninden (örn: "250,00 TL") rakam kısmını çek
-                        const priceText = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
-                        const price = parseFloat(priceText);
-                        
-                        if (name && !isNaN(price)) {
-                            results[name] = price;
+                        const name = nameEl.innerText.trim();
+                        // "250,00 TL" veya "250 TL" -> 250
+                        const priceMatch = priceEl.innerText.match(/(\d+(?:[.,]\d+)?)/);
+                        if (name && priceMatch) {
+                            results[name] = parseFloat(priceMatch[1].replace(',', '.'));
                         }
                     }
                 });
-            } else {
-                productCards.forEach(card => {
-                    const nameEl = card.querySelector('h3');
-                    const priceEl = card.querySelector('[data-testid="menu-product-price"]');
-                    
-                    if (nameEl && priceEl) {
-                        const name = nameEl.innerText.trim().toLowerCase();
-                        const priceText = priceEl.innerText.replace(/[^\d,]/g, '').replace(',', '.');
-                        const price = parseFloat(priceText);
-                        
-                        if (name && !isNaN(price)) {
-                            results[name] = price;
+            } 
+            
+            // Yöntem 2: Eğer Yöntem 1 başarısız olursa (DOM değişmişse), çok kaba ve agresif bir tarama yap
+            if (Object.keys(results).length === 0) {
+                // Sayfadaki tüm başlık niteliğindeki tagları al
+                const headings = document.querySelectorAll('h3, h4, span.name, span[class*="Name"]');
+                headings.forEach(h => {
+                    const name = h.innerText.trim();
+                    if (name.length > 3) {
+                        // İsmin bulunduğu yerin 3 üst katmanına kadar çıkıp içinde TL / ₺ geçen rakam ara
+                        let parent = h.parentElement;
+                        for (let i = 0; i < 4; i++) {
+                            if (!parent) break;
+                            const text = parent.innerText;
+                            // Regex: TL veya ₺ öncesindeki rakamı yakala
+                            const match = text.match(/(?:^|\s)(\d+(?:[.,]\d{2})?)\s*(?:TL|₺)/i);
+                            if (match) {
+                                results[name] = parseFloat(match[1].replace(',', '.'));
+                                break;
+                            }
+                            parent = parent.parentElement;
                         }
                     }
                 });
@@ -139,7 +160,6 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
 
         console.log(`✅ İşlem Tamam. Toplam ${Object.keys(scrapedData).length} ürün çekildi.`);
 
-        // Tarayıcıyı kapat ve veriyi front-end'e (Admin Panele) gönder
         await browser.close();
         
         return res.json({ 
@@ -155,7 +175,6 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
     }
 });
 // =================================================================================
-
 
 // --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU (EKSTRE İÇİN) ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
