@@ -55,15 +55,17 @@ const imapConfig = {
 };
 
 // =================================================================================
-// 🚀 YENİ ROTA: YEMEKSEPETİ BOTU (Terminatör Scraper - Kesin Sürüm)
+// 🚀 ROTA: YEMEKSEPETİ BOTU (Adım Adım Hata Ayıklama / Loglama Sürümü)
 // =================================================================================
 app.post("/api/fetch-ys-prices", async (req, res) => {
     let browser;
     try {
-        console.log("🍔 Yemeksepeti Botu Uyandı. Fiyatlar süzülüyor...");
+        console.log("--------------------------------------------------");
+        console.log("🍔 [ADIM 1] Yemeksepeti Botu Tetiklendi...");
         
         const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
 
+        console.log("🤖 [ADIM 2] Puppeteer Başlatılıyor...");
         browser = await puppeteer.launch({
             headless: 'new',
             args: [
@@ -81,10 +83,25 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         await page.setViewport({ width: 1920, height: 1080 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-        console.log("🔗 Adrese gidiliyor...");
-        await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        console.log(`🔗 [ADIM 3] Hedef Adrese Gidiliyor: ${targetUrl}`);
+        const response = await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        
+        console.log(`📡 [ADIM 4] Sayfa Yanıt Kodu (Status): ${response ? response.status() : 'Bilinmiyor'}`);
+        
+        if (response && response.status() !== 200) {
+            console.log(`⚠️ UYARI: Site normal bir 200 OK yanıtı döndürmedi! Engel (Cloudflare/Bot koruması) olabilir.`);
+        }
 
-        console.log("📜 Sayfa aşağı kaydırılıyor (Tüm ürünlerin yüklenmesi için)...");
+        // Sayfa başlığını konsola yazdır (Doğru sayfada mıyız görelim)
+        const pageTitle = await page.title();
+        console.log(`📑 [ADIM 5] Açılan Sayfanın Başlığı (Title): "${pageTitle}"`);
+
+        // Eğer başlıkta "Access Denied" veya "Cloudflare" geçiyorsa bloklanmışız demektir
+        if (pageTitle.toLowerCase().includes('access denied') || pageTitle.toLowerCase().includes('cloudflare')) {
+            throw new Error("Yemeksepeti botu engelledi (Cloudflare/Access Denied)!");
+        }
+
+        console.log("📜 [ADIM 6] Sayfa aşağı kaydırılıyor...");
         await page.evaluate(async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
@@ -102,34 +119,25 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         });
 
         await new Promise(r => setTimeout(r, 2000));
-        console.log("🧹 Ürünler ve Fiyatlar toplanıyor...");
+        console.log("🧹 [ADIM 7] Fiyatlar ve ürünler ayıklanıyor...");
         
-        // Zeki Kazıma (Scraping) Algoritması (Lazer Hedefleme)
         const scrapedData = await page.evaluate(() => {
             const results = {};
-            
-            // Tüm ürün kartlarını bul
             const listItems = document.querySelectorAll('li[data-testid="menu-product"]');
             
+            console.log("Bulunan li[data-testid='menu-product'] sayısı: ", listItems.length);
+
             listItems.forEach(item => {
-                // 1. İSMİ BUL
                 const nameSpan = item.querySelector('span[data-testid="menu-product-name"]');
                 if (!nameSpan) return;
                 const name = nameSpan.innerText.trim();
 
-                // 2. FİYATI BUL (SADECE ANA FİYAT)
                 const priceContainer = item.querySelector('p[data-testid="menu-product-price"]');
                 if (!priceContainer) return;
 
-                // İçindeki üstü çizili indirimli fiyat etiketini bul (Eski Fiyat)
                 const strikeSpan = priceContainer.querySelector('.strike-through, [data-testid="menu-product-price-before-discount"]');
-                
-                // Eğer eski fiyat etiketi varsa, onu okuma anında metinden "söküp at" ki kafa karıştırmasın
-                if (strikeSpan) {
-                    strikeSpan.remove(); 
-                }
+                if (strikeSpan) strikeSpan.remove(); 
 
-                // Geriye sadece asıl fiyat kaldı (Örn: "440 TL")
                 const cleanPriceText = priceContainer.innerText.trim();
                 const priceMatch = cleanPriceText.match(/(\d+(?:[.,]\d+)?)/);
                 
@@ -141,7 +149,8 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
             return results;
         });
 
-        console.log(`✅ İşlem Tamam. Toplam ${Object.keys(scrapedData).length} ürün çekildi.`);
+        console.log(`✅ [ADIM 8] İşlem Başarılı. Çekilen Ürün Sayısı: ${Object.keys(scrapedData).length}`);
+        console.log("--------------------------------------------------");
 
         await browser.close();
         
@@ -152,13 +161,12 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Bot Hatası:", error);
+        console.error("❌ [HATA YAKALANDI]:", error.message);
+        console.log("--------------------------------------------------");
         if (browser) await browser.close();
         return res.status(500).json({ success: false, error: error.message });
     }
 });
-// =================================================================================
-// =================================================================================
 
 // --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU (EKSTRE İÇİN) ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
