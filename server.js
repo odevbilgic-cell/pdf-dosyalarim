@@ -65,7 +65,7 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
         
         const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
 
-        console.log("🤖 [ADIM 2] Puppeteer Başlatılıyor...");
+      console.log("🤖 [ADIM 2] Puppeteer Stealth Modda Başlatılıyor...");
         browser = await puppeteer.launch({
             headless: 'new',
             args: [
@@ -74,14 +74,22 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
                 '--disable-dev-shm-usage',
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
-                '--window-size=1920x1080'
+                '--window-size=1920,1080',
+                '--disable-blink-features=AutomationControlled', // Bot imzasını gizler
+                '--lang=tr-TR,tr'
             ],
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null 
         });
 
         const page = await browser.newPage();
+        
+        // Gerçek bir kullanıcı gibi görünmek için navigator.webdriver gizlemesi
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        });
+
         await page.setViewport({ width: 1920, height: 1080 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
         console.log(`🔗 [ADIM 3] Hedef Adrese Gidiliyor: ${targetUrl}`);
         const response = await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
