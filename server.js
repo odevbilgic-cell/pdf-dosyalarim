@@ -107,50 +107,67 @@ app.post("/api/fetch-ys-prices", async (req, res) => {
 
         console.log("🧹 Ürünler ve Fiyatlar toplanıyor...");
         
-        // Zeki Kazıma (Scraping) Algoritması
+        // Zeki Kazıma (Scraping) Algoritması - YENİ YEMEKSEPETİ DOM YAPISINA GÖRE GÜNCELLENDİ
         const scrapedData = await page.evaluate(() => {
             const results = {};
             
-            // Yöntem 1: Standart Data Test ID (Yemeksepeti güncel yapısı)
-            const listItems = document.querySelectorAll('[data-testid="menu-product"]');
+            // Tüm ürün kartlarını bul (Gönderilen HTML'e göre data-testid="menu-product" kullanılmış)
+            const productCards = document.querySelectorAll('li[data-testid="menu-product"], div[data-testid="menu-product"]');
             
-            if (listItems.length > 0) {
-                listItems.forEach(item => {
-                    // İsim h3, h4 veya p olabilir
-                    const nameEl = item.querySelector('h3, h4, [data-testid="menu-product-name"]');
-                    const priceEl = item.querySelector('[data-testid="menu-product-price"]');
+            productCards.forEach(card => {
+                // 1. Ürün İsmini Yakala
+                const nameEl = card.querySelector('[data-testid="menu-product-name"]');
+                let name = "";
+                if (nameEl) {
+                    name = nameEl.innerText.trim();
+                } else {
+                    // Eğer testid yoksa alternatif başlık arayışı
+                    const h3 = card.querySelector('h3.product-tile__title');
+                    if (h3) name = h3.innerText.trim();
+                }
+
+                // 2. Ürün Fiyatını Yakala
+                const priceEl = card.querySelector('[data-testid="menu-product-price"]');
+                let price = 0;
+                
+                if (priceEl) {
+                    // İçindeki eski/üzeri çizili fiyatları (<span class="strike-through">) hesaba katmamak için sadece ana text nodelarını al
+                    let rawPriceText = "";
+                    priceEl.childNodes.forEach(node => {
+                        // Sadece metin düğümlerini al (element düğümlerini yani üzeri çizili fiyatları es geç)
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            rawPriceText += node.textContent;
+                        }
+                    });
                     
-                    if (nameEl && priceEl) {
-                        const name = nameEl.innerText.trim();
-                        // "250,00 TL" veya "250 TL" -> 250
-                        const priceMatch = priceEl.innerText.match(/(\d+(?:[.,]\d+)?)/);
-                        if (name && priceMatch) {
-                            results[name] = parseFloat(priceMatch[1].replace(',', '.'));
-                        }
+                    // Rakamları ve virgülü/noktayı çek
+                    const priceMatch = rawPriceText.match(/(\d+(?:[.,]\d+)?)/);
+                    if (priceMatch) {
+                        price = parseFloat(priceMatch[1].replace(',', '.'));
                     }
-                });
-            } 
-            
-            // Yöntem 2: Eğer Yöntem 1 başarısız olursa (DOM değişmişse), çok kaba ve agresif bir tarama yap
+                }
+
+                if (name && price > 0) {
+                    results[name] = price;
+                }
+            });
+
+            // Yöntem 2: Eğer liste boş dönerse (Platform tekrar tasarım değiştirirse yedek sistem)
             if (Object.keys(results).length === 0) {
-                // Sayfadaki tüm başlık niteliğindeki tagları al
-                const headings = document.querySelectorAll('h3, h4, span.name, span[class*="Name"]');
-                headings.forEach(h => {
-                    const name = h.innerText.trim();
-                    if (name.length > 3) {
-                        // İsmin bulunduğu yerin 3 üst katmanına kadar çıkıp içinde TL / ₺ geçen rakam ara
-                        let parent = h.parentElement;
-                        for (let i = 0; i < 4; i++) {
-                            if (!parent) break;
-                            const text = parent.innerText;
-                            // Regex: TL veya ₺ öncesindeki rakamı yakala
-                            const match = text.match(/(?:^|\s)(\d+(?:[.,]\d{2})?)\s*(?:TL|₺)/i);
-                            if (match) {
-                                results[name] = parseFloat(match[1].replace(',', '.'));
-                                break;
-                            }
-                            parent = parent.parentElement;
+                const altNames = document.querySelectorAll('h3');
+                altNames.forEach(h3 => {
+                    const name = h3.innerText.trim();
+                    let parent = h3.parentElement;
+                    for (let i = 0; i < 3; i++) {
+                        if (!parent) break;
+                        const text = parent.innerText;
+                        // Üzeri çizili fiyatları pas geçmek için genellikle ilk rakamı hedefler
+                        const match = text.match(/(?:^|\s)(\d+(?:[.,]\d{2})?)\s*(?:TL|₺)/i);
+                        if (match && name.length > 3) {
+                            results[name] = parseFloat(match[1].replace(',', '.'));
+                            break;
                         }
+                        parent = parent.parentElement;
                     }
                 });
             }
