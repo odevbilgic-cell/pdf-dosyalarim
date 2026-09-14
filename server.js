@@ -5,11 +5,8 @@ const imaps = require("imap-simple");
 const simpleParser = require("mailparser").simpleParser;
 const pdfParse = require("pdf-parse");
 const crypto = require("crypto");
-
-// 🕷️ YENİ BOT KÜTÜPHANELERİ
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
+const axios = require("axios");
+const cheerio = require("cheerio");
 
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getDatabase } = require("firebase-admin/database");
@@ -25,21 +22,14 @@ if (!process.env.FIREBASE_CREDENTIALS) {
   console.error("HATA: FIREBASE_CREDENTIALS Render'a eklenmemiş!");
 }
 
-// Güvenli başlatma (Render.com ortamında json hatasını önler)
-let serviceAccount;
-try {
-    serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
-} catch(e) {
-    console.error("Firebase Key JSON formatında değil veya eksik!", e);
-}
+const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
 
-if(serviceAccount) {
-    initializeApp({
-      credential: cert(serviceAccount),
-      databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app",
-    });
-}
-const database = getDatabase();
+const firebaseApp = initializeApp({
+  credential: cert(serviceAccount),
+  databaseURL: "https://olimpiyatkokorecmenu-default-rtdb.europe-west1.firebasedatabase.app",
+});
+
+const database = getDatabase(firebaseApp);
 
 // --- 2. GMAIL IMAP BAĞLANTI AYARLARI ---
 const imapConfig = {
@@ -54,129 +44,7 @@ const imapConfig = {
   },
 };
 
-// =================================================================================
-// 🚀 ROTA: YEMEKSEPETİ BOTU (Adım Adım Hata Ayıklama / Loglama Sürümü)
-// =================================================================================
-app.post("/api/fetch-ys-prices", async (req, res) => {
-    let browser;
-    try {
-        console.log("--------------------------------------------------");
-        console.log("🍔 [ADIM 1] Yemeksepeti Botu Tetiklendi...");
-        
-        const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
-
-      console.log("🤖 [ADIM 2] Puppeteer Stealth Modda Başlatılıyor...");
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                '--window-size=1920,1080',
-                '--disable-blink-features=AutomationControlled', // Bot imzasını gizler
-                '--lang=tr-TR,tr'
-            ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null 
-        });
-
-        const page = await browser.newPage();
-        
-        // Gerçek bir kullanıcı gibi görünmek için navigator.webdriver gizlemesi
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        });
-
-        await page.setViewport({ width: 1920, height: 1080 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-
-        console.log(`🔗 [ADIM 3] Hedef Adrese Gidiliyor: ${targetUrl}`);
-        const response = await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-        
-        console.log(`📡 [ADIM 4] Sayfa Yanıt Kodu (Status): ${response ? response.status() : 'Bilinmiyor'}`);
-        
-        if (response && response.status() !== 200) {
-            console.log(`⚠️ UYARI: Site normal bir 200 OK yanıtı döndürmedi! Engel (Cloudflare/Bot koruması) olabilir.`);
-        }
-
-        // Sayfa başlığını konsola yazdır (Doğru sayfada mıyız görelim)
-        const pageTitle = await page.title();
-        console.log(`📑 [ADIM 5] Açılan Sayfanın Başlığı (Title): "${pageTitle}"`);
-
-        // Eğer başlıkta "Access Denied" veya "Cloudflare" geçiyorsa bloklanmışız demektir
-        if (pageTitle.toLowerCase().includes('access denied') || pageTitle.toLowerCase().includes('cloudflare')) {
-            throw new Error("Yemeksepeti botu engelledi (Cloudflare/Access Denied)!");
-        }
-
-        console.log("📜 [ADIM 6] Sayfa aşağı kaydırılıyor...");
-        await page.evaluate(async () => {
-            await new Promise((resolve) => {
-                let totalHeight = 0;
-                let distance = 300;
-                let timer = setInterval(() => {
-                    let scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    if(totalHeight >= scrollHeight - window.innerHeight){
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 150);
-            });
-        });
-
-        await new Promise(r => setTimeout(r, 2000));
-        console.log("🧹 [ADIM 7] Fiyatlar ve ürünler ayıklanıyor...");
-        
-        const scrapedData = await page.evaluate(() => {
-            const results = {};
-            const listItems = document.querySelectorAll('li[data-testid="menu-product"]');
-            
-            console.log("Bulunan li[data-testid='menu-product'] sayısı: ", listItems.length);
-
-            listItems.forEach(item => {
-                const nameSpan = item.querySelector('span[data-testid="menu-product-name"]');
-                if (!nameSpan) return;
-                const name = nameSpan.innerText.trim();
-
-                const priceContainer = item.querySelector('p[data-testid="menu-product-price"]');
-                if (!priceContainer) return;
-
-                const strikeSpan = priceContainer.querySelector('.strike-through, [data-testid="menu-product-price-before-discount"]');
-                if (strikeSpan) strikeSpan.remove(); 
-
-                const cleanPriceText = priceContainer.innerText.trim();
-                const priceMatch = cleanPriceText.match(/(\d+(?:[.,]\d+)?)/);
-                
-                if (name && priceMatch) {
-                    results[name] = parseFloat(priceMatch[1].replace(',', '.'));
-                }
-            });
-
-            return results;
-        });
-
-        console.log(`✅ [ADIM 8] İşlem Başarılı. Çekilen Ürün Sayısı: ${Object.keys(scrapedData).length}`);
-        console.log("--------------------------------------------------");
-
-        await browser.close();
-        
-        return res.json({ 
-            success: true, 
-            message: "Fiyatlar başarıyla çekildi.",
-            data: scrapedData 
-        });
-
-    } catch (error) {
-        console.error("❌ [HATA YAKALANDI]:", error.message);
-        console.log("--------------------------------------------------");
-        if (browser) await browser.close();
-        return res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU (EKSTRE İÇİN) ---
+// --- ANA ROTA: AKILLI EŞLEŞTİRME VE ÇEKİM MOTORU ---
 app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   let connection; 
 
@@ -373,6 +241,8 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     if (!currentEkstre.items) currentEkstre.items = {};
 
+    // 🧹 ÇÖP TEMİZLİĞİ: Eski "item_1", "item_2" gibi verileri temizle!
+    // Manuel eklediğin (-N... başlayanlar) asla silinmez.
     let cleanedOldData = false;
     Object.keys(currentEkstre.items).forEach(key => {
         if (key.startsWith("item_")) {
@@ -383,6 +253,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
 
     let addedCount = 0;
     
+    // Bulunan yeni harcamaları listeye ekle
     Object.keys(newParsedItems).forEach(key => {
         if (!currentEkstre.items[key]) {
             currentEkstre.items[key] = newParsedItems[key];
@@ -390,6 +261,7 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
         }
     });
 
+    // Eğer ne eski çöp temizlendiyse ne de yeni veri eklendiyse
     if (addedCount === 0 && !cleanedOldData) {
         return res.json({ success: true, message: `⚠️ Postalar tarandı ancak eklenecek yeni bir harcama bulunamadı. Hepsi zaten kayıtlı.` });
     }
@@ -409,6 +281,96 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
     if (connection) {
         connection.end();
     }
+  }
+});
+
+// --- YEMEKSEPETİ CANLI FİYAT ÇEKİM MOTORU (Bot Koruması Aşma Modülü) ---
+app.get("/api/fetch-ys-prices", async (req, res) => {
+  try {
+    console.log("Yemeksepeti fiyat çekim emri alındı. Bot koruması aşılıyor...");
+
+    // 1. Hedef URL (Yemeksepeti Dükkan Linkin)
+    const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
+    
+    // 2. Google Önbelleği (Webcache) üzerinden dolaşma URL'si (Ana plan)
+    const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${targetUrl}`;
+
+    let htmlData = "";
+
+    try {
+        // Önce Google Önbelleğine Googlebot kılığıyla gitmeyi deniyoruz
+        const response = await axios.get(cacheUrl, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            timeout: 10000
+        });
+        htmlData = response.data;
+        console.log("Veri Google Cache üzerinden başarıyla çekildi.");
+    } catch (cacheErr) {
+        // Eğer Google Cache yanıt vermezse, doğrudan Yemeksepeti'ne Googlebot kılığında gidiyoruz
+        console.log("Google Cache yanıt vermedi, doğrudan maskeli istek atılıyor...");
+        const fallbackResponse = await axios.get(targetUrl, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
+            },
+            timeout: 10000
+        });
+        htmlData = fallbackResponse.data;
+    }
+
+    // 3. Çekilen HTML'i Cheerio ile (sanal bir tarayıcı gibi) parçalıyoruz
+    const $ = cheerio.load(htmlData);
+    let pricesList = [];
+
+    // 4. Schema.org / JSON-LD yapılandırılmış verilerini bul ve ayıkla
+    $('script[type="application/ld+json"]').each((index, element) => {
+        try {
+            const jsonData = JSON.parse($(element).html());
+            
+            // JSON ağacında ne kadar derin olursa olsun MenuItem'ları bulan zeki arama motoru
+            function findMenuItems(obj) {
+                if (!obj) return;
+                if (Array.isArray(obj)) {
+                    obj.forEach(findMenuItems);
+                } else if (typeof obj === 'object') {
+                    // Eğer obje bir Menü Kalemi ise ve içinde fiyat/isim barındırıyorsa listeye at
+                    if ((obj['@type'] === 'MenuItem' || obj['@type'] === 'Product') && obj.name && obj.offers && obj.offers.price) {
+                        pricesList.push({
+                            name: obj.name.trim(),
+                            price: parseFloat(obj.offers.price)
+                        });
+                    } else if (obj.name && obj.offers && obj.offers.price) {
+                         // Bazen type belirtilmez ama offer-price ikilisi vardır (Alternatif yakalama)
+                         pricesList.push({
+                            name: obj.name.trim(),
+                            price: parseFloat(obj.offers.price)
+                        });
+                    }
+                    // Ağacın alt dallarına in
+                    Object.values(obj).forEach(findMenuItems);
+                }
+            }
+            
+            findMenuItems(jsonData);
+        } catch (e) {
+            // Hatalı/Bozuk bir script tagı varsa sistemin çökmesini engelle
+        }
+    });
+
+    // Sonuç kontrolü ve Frontend'e veri gönderimi
+    if (pricesList.length > 0) {
+        console.log(`Toplam ${pricesList.length} ürün fiyatı başarıyla ayıklandı.`);
+        return res.json({ success: true, prices: pricesList });
+    } else {
+        return res.json({ success: false, error: "JSON-LD verisi okundu ancak menü fiyatları bulunamadı." });
+    }
+
+  } catch (error) {
+    console.error("Yemeksepeti Çekim Hatası:", error.message);
+    return res.json({ success: false, error: "Fiyatlar çekilemedi: " + error.message });
   }
 });
 
