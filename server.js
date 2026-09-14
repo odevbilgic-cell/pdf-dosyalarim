@@ -284,90 +284,16 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   }
 });
 
-// --- YEMEKSEPETİ CANLI FİYAT ÇEKİM MOTORU (403 BYPASS & PROXY ZİNCİRİ) ---
-app.get("/api/fetch-ys-prices", async (req, res) => {
+// --- YEMEKSEPETİ CANLI FİYAT ÇEKİM MOTORU (BOOKMARKLET YÖNTEMİ) ---
+let cachedYSPrices = []; // Bellekte canlı fiyatları tutacak değişken
+
+// Tarayıcıdan tek tıkla gelen Yemeksepeti verisini karşılayan rota
+app.post("/api/sync-ys-live", express.json({ limit: "15mb" }), (req, res) => {
   try {
-    console.log("Yemeksepeti canlı menü çekimi başlatıldı...");
-    const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
-
-    // Cloudflare 403 blokajını aşmak için aracı proxy servisleri
-    const proxyGateways = [
-      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
-      `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(targetUrl)}`
-    ];
-
-    let htmlData = null;
-
-    // 1. Proxy zincirini sırayla dene
-    for (const gatewayUrl of proxyGateways) {
-      try {
-        console.log(`Denenecek köprü: ${new URL(gatewayUrl).hostname}`);
-        const response = await axios.get(gatewayUrl, {
-          timeout: 15000,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "tr-TR,tr;q=0.9"
-          }
-        });
-
-        // AllOrigins JSON formatında döndürürse "contents" içinden al
-        let rawHtml = response.data;
-        if (typeof response.data === "object" && response.data.contents) {
-            rawHtml = response.data.contents;
-        }
-
-        if (typeof rawHtml === "string" && rawHtml.includes("__NEXT_DATA__")) {
-          htmlData = rawHtml;
-          console.log(`✅ Veri başarıyla çekildi (${new URL(gatewayUrl).hostname})`);
-          break;
-        }
-      } catch (err) {
-        console.log(`Köprü başarısız (${new URL(gatewayUrl).hostname}):`, err.message);
-      }
-    }
-
-    // 2. Eğer proxy'ler yanıt vermezse doğrudan son bir deneme yap
-    if (!htmlData) {
-      console.log("Köprüler yanıt vermedi, doğrudan istek deneniyor...");
-      try {
-          const directResponse = await axios.get(targetUrl, {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "tr-TR,tr;q=0.9"
-            },
-            timeout: 10000
-          });
-          htmlData = directResponse.data;
-      } catch(e) {
-          console.log("Doğrudan istek de başarısız oldu.");
-      }
-    }
-
-    // 3. HTML içindeki Next.js JSON verisini ayıkla
-    if (!htmlData) {
-        return res.json({ 
-            success: false, 
-            error: "Yemeksepeti güvenlik duvarı (403) aşılamadı. Proxy servisleri engellenmiş olabilir." 
-        });
-    }
-
-    const $ = cheerio.load(htmlData);
-    const nextDataScript = $("#__NEXT_DATA__").html();
-
-    if (!nextDataScript) {
-      return res.json({ 
-        success: false, 
-        error: "Sayfa alındı ancak Next.js veri bloğu (__NEXT_DATA__) bulunamadı." 
-      });
-    }
-
-    const nextData = JSON.parse(nextDataScript);
+    const nextData = req.body;
     const productsMap = {};
     const seen = new Set();
 
-    // Next.js JSON ağacında tüm ürünleri yakalayan motor
     function walk(node) {
       if (!node) return;
       if (Array.isArray(node)) {
@@ -379,9 +305,7 @@ app.get("/api/fetch-ys-prices", async (req, res) => {
           let price = null;
           let strikePrice = null;
 
-          if (typeof node.price === "number" && node.price > 0) {
-            price = node.price;
-          }
+          if (typeof node.price === "number" && node.price > 0) price = node.price;
           if (typeof node.originalPrice === "number" && node.originalPrice > 0) {
             strikePrice = node.originalPrice;
           } else if (typeof node.strikeThroughPrice === "number" && node.strikeThroughPrice > 0) {
@@ -405,35 +329,32 @@ app.get("/api/fetch-ys-prices", async (req, res) => {
               seen.add(key);
               productsMap[key] = {
                 name: cleanName,
-                price: liveListedPrice, // Sitede girilmiş olan liste fiyatı
-                customerPrice: price    // Müşterinin gördüğü indirimli fiyat
+                price: liveListedPrice, // Liste fiyatı (Örn: 375 TL)
+                customerPrice: price    // İndirimli satış fiyatı (Örn: 300 TL)
               };
             }
           }
         }
-
         for (const k of Object.keys(node)) {
-          if (k !== "router" && k !== "appGip") {
-            walk(node[k]);
-          }
+          if (k !== "router" && k !== "appGip") walk(node[k]);
         }
       }
     }
 
     walk(nextData);
-    const pricesList = Object.values(productsMap);
+    cachedYSPrices = Object.values(productsMap);
 
-    if (pricesList.length > 0) {
-      console.log(`✅ Başarılı! Toplam ${pricesList.length} ürün fiyatı ayıklandı.`);
-      return res.json({ success: true, prices: pricesList });
-    } else {
-      return res.json({ success: false, error: "Menü ayrıştırılamadı veya boş döndü." });
-    }
-
-  } catch (error) {
-    console.error("Yemeksepeti Çekim Hatası:", error.message);
-    return res.status(500).json({ success: false, error: "Sunucu hatası: " + error.message });
+    console.log(`✅ [Yemeksepeti Canlı] ${cachedYSPrices.length} ürün başarıyla güncellendi!`);
+    return res.json({ success: true, count: cachedYSPrices.length, prices: cachedYSPrices });
+  } catch (err) {
+    console.error("YS Aktarım Hatası:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// Admin panelinin kaydedilmiş canlı fiyatları okuduğu rota
+app.get("/api/get-cached-ys-prices", (req, res) => {
+  res.json({ success: true, prices: cachedYSPrices });
 });
 
 app.listen(PORT, () => {
