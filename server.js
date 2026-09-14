@@ -284,93 +284,116 @@ app.post("/api/fetch-latest-ekstreler", async (req, res) => {
   }
 });
 
-// --- YEMEKSEPETİ CANLI FİYAT ÇEKİM MOTORU (Bot Koruması Aşma Modülü) ---
+// --- YEMEKSEPETİ CANLI FİYAT ÇEKİM MOTORU (GÜNCELLENMİŞ) ---
 app.get("/api/fetch-ys-prices", async (req, res) => {
   try {
-    console.log("Yemeksepeti fiyat çekim emri alındı. Bot koruması aşılıyor...");
+    console.log("Yemeksepeti canlı menü çekimi başlatıldı...");
 
-    // 1. Hedef URL (Yemeksepeti Dükkan Linkin)
     const targetUrl = "https://www.yemeksepeti.com/restaurant/hk8c/olimpiyat-kokorec-and-fast-food-hk8c";
-    
-    // 2. Google Önbelleği (Webcache) üzerinden dolaşma URL'si (Ana plan)
-    const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${targetUrl}`;
 
-    let htmlData = "";
-
-    try {
-        // Önce Google Önbelleğine Googlebot kılığıyla gitmeyi deniyoruz
-        const response = await axios.get(cacheUrl, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            },
-            timeout: 10000
-        });
-        htmlData = response.data;
-        console.log("Veri Google Cache üzerinden başarıyla çekildi.");
-    } catch (cacheErr) {
-        // Eğer Google Cache yanıt vermezse, doğrudan Yemeksepeti'ne Googlebot kılığında gidiyoruz
-        console.log("Google Cache yanıt vermedi, doğrudan maskeli istek atılıyor...");
-        const fallbackResponse = await axios.get(targetUrl, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-                "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
-            },
-            timeout: 10000
-        });
-        htmlData = fallbackResponse.data;
-    }
-
-    // 3. Çekilen HTML'i Cheerio ile (sanal bir tarayıcı gibi) parçalıyoruz
-    const $ = cheerio.load(htmlData);
-    let pricesList = [];
-
-    // 4. Schema.org / JSON-LD yapılandırılmış verilerini bul ve ayıkla
-    $('script[type="application/ld+json"]').each((index, element) => {
-        try {
-            const jsonData = JSON.parse($(element).html());
-            
-            // JSON ağacında ne kadar derin olursa olsun MenuItem'ları bulan zeki arama motoru
-            function findMenuItems(obj) {
-                if (!obj) return;
-                if (Array.isArray(obj)) {
-                    obj.forEach(findMenuItems);
-                } else if (typeof obj === 'object') {
-                    // Eğer obje bir Menü Kalemi ise ve içinde fiyat/isim barındırıyorsa listeye at
-                    if ((obj['@type'] === 'MenuItem' || obj['@type'] === 'Product') && obj.name && obj.offers && obj.offers.price) {
-                        pricesList.push({
-                            name: obj.name.trim(),
-                            price: parseFloat(obj.offers.price)
-                        });
-                    } else if (obj.name && obj.offers && obj.offers.price) {
-                         // Bazen type belirtilmez ama offer-price ikilisi vardır (Alternatif yakalama)
-                         pricesList.push({
-                            name: obj.name.trim(),
-                            price: parseFloat(obj.offers.price)
-                        });
-                    }
-                    // Ağacın alt dallarına in
-                    Object.values(obj).forEach(findMenuItems);
-                }
-            }
-            
-            findMenuItems(jsonData);
-        } catch (e) {
-            // Hatalı/Bozuk bir script tagı varsa sistemin çökmesini engelle
-        }
+    // Gerçek bir masaüstü tarayıcısı gibi istek atarak bot korumasını aşıyoruz
+    const response = await axios.get(targetUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1"
+      },
+      timeout: 15000
     });
 
-    // Sonuç kontrolü ve Frontend'e veri gönderimi
+    const $ = cheerio.load(response.data);
+    const nextDataScript = $("#__NEXT_DATA__").html();
+
+    if (!nextDataScript) {
+      return res.json({ 
+        success: false, 
+        error: "Sayfa alındı ancak Next.js veri bloğu (__NEXT_DATA__) bulunamadı." 
+      });
+    }
+
+    const nextData = JSON.parse(nextDataScript);
+    const productsMap = {};
+    const seen = new Set();
+
+    // Next.js JSON ağacında derinlemesine gezerek tüm ürünleri ve fiyatları toplayan motor
+    function walk(node) {
+      if (!node) return;
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+        return;
+      }
+      if (typeof node === "object") {
+        if (node.name && typeof node.name === "string") {
+          let price = null;
+          let strikePrice = null;
+
+          if (typeof node.price === "number" && node.price > 0) {
+            price = node.price;
+          }
+          if (typeof node.originalPrice === "number" && node.originalPrice > 0) {
+            strikePrice = node.originalPrice;
+          } else if (typeof node.strikeThroughPrice === "number" && node.strikeThroughPrice > 0) {
+            strikePrice = node.strikeThroughPrice;
+          }
+
+          // Varyasyonlu ürün kontrolü
+          if (Array.isArray(node.productVariations) && node.productVariations.length > 0) {
+            const v = node.productVariations[0];
+            if (v && typeof v.price === "number") {
+              price = v.price;
+              strikePrice = v.originalPrice || v.strikeThroughPrice || strikePrice;
+            }
+          }
+
+          // Bir menü ürünü olduğunu doğrulayan alanlar
+          if (price !== null && (node.id || node.code || node.description !== undefined)) {
+            const cleanName = node.name.trim();
+            const key = cleanName.toLocaleLowerCase("tr-TR");
+
+            // Sitedeki asıl liste fiyatı (kampanya öncesi girilen fiyat)
+            const liveListedPrice = (strikePrice && strikePrice > price) ? strikePrice : price;
+
+            if (!seen.has(key)) {
+              seen.add(key);
+              productsMap[key] = {
+                name: cleanName,
+                price: liveListedPrice,      // Siteye girilen liste fiyatı (Kıyaslama için kullanılacak)
+                customerPrice: price         // Müşterinin ödediği indirimli fiyat
+              };
+            }
+          }
+        }
+
+        for (const k of Object.keys(node)) {
+          if (k !== "router" && k !== "appGip") {
+            walk(node[k]);
+          }
+        }
+      }
+    }
+
+    walk(nextData);
+
+    const pricesList = Object.values(productsMap);
+
     if (pricesList.length > 0) {
-        console.log(`Toplam ${pricesList.length} ürün fiyatı başarıyla ayıklandı.`);
-        return res.json({ success: true, prices: pricesList });
+      console.log(`✅ Başarılı! Yemeksepeti'nden ${pricesList.length} adet ürün çekildi.`);
+      return res.json({ success: true, prices: pricesList });
     } else {
-        return res.json({ success: false, error: "JSON-LD verisi okundu ancak menü fiyatları bulunamadı." });
+      return res.json({ success: false, error: "JSON verisi tarandı ancak menü ürünleri ayrıştırılamadı." });
     }
 
   } catch (error) {
     console.error("Yemeksepeti Çekim Hatası:", error.message);
-    return res.json({ success: false, error: "Fiyatlar çekilemedi: " + error.message });
+    return res.status(500).json({ success: false, error: "Bağlantı hatası: " + error.message });
   }
 });
 
